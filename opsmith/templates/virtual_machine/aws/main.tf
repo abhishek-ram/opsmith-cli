@@ -3,7 +3,11 @@ provider "aws" {
 }
 
 data "aws_ssm_parameter" "ecs_optimized_ami" {
-  name = "/aws/service/ecs/optimized-ami/amazon-linux-2023/${var.instance_arch}/recommended"
+  name = (
+    var.instance_arch == "arm64" ?
+    "/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended" :
+    "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended"
+  )
 }
 
 
@@ -242,6 +246,12 @@ resource "aws_instance" "app_server" {
   subnet_id     = aws_subnet.public.id
   iam_instance_profile = aws_iam_instance_profile.ec2_instance_profile.name
   vpc_security_group_ids = [aws_security_group.instance_sg.id]
+
+  depends_on = [
+    aws_iam_role_policy_attachment.ecr_access,
+    aws_iam_role_policy_attachment.ssm_managed_instance,
+    aws_iam_role_policy_attachment.cloudwatch_agent,
+  ]
 
   root_block_device {
     volume_type           = "gp3"

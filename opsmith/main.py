@@ -151,7 +151,7 @@ def main(
 
     src_dir = src_dir or os.getcwd()
     ctx.obj = {
-        "src_dir": src_dir,
+        "src_dir": Path(src_dir),
         "deployments_path": Path(src_dir).joinpath(settings.deployments_dir),
         "agent": build_agent(model_config=model, instrument=bool(logfire_token)),
     }
@@ -442,7 +442,7 @@ def deploy(ctx: typer.Context):
 
         deployment_strategy = DEPLOYMENT_STRATEGY_REGISTRY.get_strategy_class(selected_strategy)(
             ctx.obj["agent"],
-            ctx.parent.params["src_dir"],
+            ctx.obj["src_dir"],
         )
         deployment_strategy.deploy(deployment_config, new_env)
 
@@ -473,7 +473,7 @@ def deploy(ctx: typer.Context):
 
     deployment_strategy = DEPLOYMENT_STRATEGY_REGISTRY.get_strategy_class(selected_env.strategy)(
         ctx.obj["agent"],
-        ctx.parent.params["src_dir"],
+        ctx.obj["src_dir"],
     )
 
     if selected_action == "release":
@@ -536,13 +536,9 @@ def repomap(ctx: typer.Context):
     Generates a map of the repository, showing important files and code elements.
     """
     print("Generating repo map now...")
-    if ctx.parent.params["src_dir"]:
-        current_dir_str = ctx.parent.params["src_dir"]
-    else:
-        current_dir_str = os.getcwd()
 
     repo_mapper = RepoMap(
-        src_dir=current_dir_str,
+        src_dir=ctx.obj["src_dir"],
         verbose=ctx.parent.params["verbose"],
     )
     repo_map_str = repo_mapper.get_repo_map()

@@ -2,10 +2,11 @@ all:
   hosts:
     ec2-instance:
       ansible_host: "{{ instance_id }}"
+      ansible_user: "{{ user }}"
       ansible_connection: aws_ssm
       ansible_aws_ssm_region: "{{region}}"
-      ansible_aws_ssm_bucket_name: "{{ app_name }}-ssm-logs-{{ environment_name }}"
-      ansible_aws_ssm_document: "{{app_name}}-ssm-session-prefs"
+      ansible_aws_ssm_bucket_name: "{{ app_name }}-{{ environment_name }}-ssm-logs"
+      ansible_aws_ssm_document: "{{app_name}}-{{ environment_name }}-ssm-session-prefs"
       ansible_aws_ssm_plugin: "{{ ssm_plugin }}"
   vars:
     # Global SSM settings

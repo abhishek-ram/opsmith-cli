@@ -276,7 +276,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
 
         infra_snippets_list = []
         for infra in deployment_config.infra_deps:
-            template = self.docker_compose_snippets_env.get_template(f"{infra.provider}.yml")
+            template = self.docker_compose_snippets_env.get_template(f"{infra.provider.value}.yml")
 
             content = template.render(
                 version=infra.version,
