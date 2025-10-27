@@ -102,8 +102,10 @@ class ModelRegistry:
         for model_cls in [
             OpenAIGPT41,
             OpenAIGPTO3,
+            OpenAIGPT5,
             AnthropicClaudeSonnet37,
             AnthropicClaudeSonnet4,
+            AnthropicClaudeSonnet45,
             GoogleGlaGemini25Pro,
         ]:
             self.register(model_cls)
@@ -162,6 +164,25 @@ class OpenAIGPTO3(BaseAiModel):
         return OpenAIModelSettings(openai_reasoning_effort="high")
 
 
+class OpenAIGPT5(BaseAiModel):
+    @classmethod
+    def name(cls) -> str:
+        return "gpt-5"
+
+    @classmethod
+    def provider(cls) -> str:
+        return "openai"
+
+    @classmethod
+    def api_key_prefix(cls) -> str:
+        return "OPENAI"
+
+    @classmethod
+    def get_model_settings(cls) -> ModelSettings:
+        """Returns model-specific settings."""
+        return OpenAIModelSettings()
+
+
 class AnthropicClaudeSonnet37(BaseAiModel):
     @classmethod
     def name(cls) -> str:
@@ -185,6 +206,25 @@ class AnthropicClaudeSonnet4(BaseAiModel):
     @classmethod
     def name(cls) -> str:
         return "claude-sonnet-4-20250514"
+
+    @classmethod
+    def provider(cls) -> str:
+        return "anthropic"
+
+    @classmethod
+    def api_key_prefix(cls) -> str:
+        return "ANTHROPIC"
+
+    @classmethod
+    def get_model_settings(cls) -> ModelSettings:
+        """Returns model-specific settings."""
+        return AnthropicModelSettings()
+
+
+class AnthropicClaudeSonnet45(BaseAiModel):
+    @classmethod
+    def name(cls) -> str:
+        return "claude-sonnet-4-5-20250929"
 
     @classmethod
     def provider(cls) -> str:
