@@ -133,6 +133,9 @@
                 timeout_secs: 5
               encoding:
                 codec: text 
+              retention:
+                days: 30
+                enabled: true
 
         dest: /etc/vector/vector.yaml
         mode: "0644"
