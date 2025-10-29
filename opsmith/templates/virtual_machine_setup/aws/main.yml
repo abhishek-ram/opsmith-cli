@@ -124,7 +124,7 @@
               inputs:
                 - enrich_containers
               region: ap-south-1
-              group_name: dakya-care-dev
+              group_name: {{ app_name }}-{{ environment_name }}
               stream_name: containers
               create_missing_group: true
               create_missing_stream: true
