@@ -107,6 +107,7 @@ class ModelRegistry:
             AnthropicClaudeSonnet4,
             AnthropicClaudeSonnet45,
             GoogleGlaGemini25Pro,
+            GoogleGlaGemini3Pro,
         ]:
             self.register(model_cls)
 
@@ -256,9 +257,26 @@ class GoogleGlaGemini25Pro(BaseAiModel):
     @classmethod
     def get_model_settings(cls) -> ModelSettings:
         """Returns model-specific settings."""
-        return GoogleModelSettings(
-            google_thinking_config=ThinkingConfigDict(include_thoughts=True, thinking_budget=-1)
-        )
+        return GoogleModelSettings(google_thinking_config=ThinkingConfigDict(thinking_budget=-1))
+
+
+class GoogleGlaGemini3Pro(BaseAiModel):
+    @classmethod
+    def name(cls) -> str:
+        return "gemini-3-pro-preview"
+
+    @classmethod
+    def provider(cls) -> str:
+        return "google-gla"
+
+    @classmethod
+    def api_key_prefix(cls) -> str:
+        return "GEMINI"
+
+    @classmethod
+    def get_model_settings(cls) -> ModelSettings:
+        """Returns model-specific settings."""
+        return GoogleModelSettings(google_thinking_config=ThinkingConfigDict(thinking_level="HIGH"))
 
 
 MODEL_REGISTRY = ModelRegistry()
