@@ -305,6 +305,12 @@ class MonolithicDeploymentState(BaseModel):
     frontend_cdn: List[FrontendCDNState] = Field(
         default_factory=list, description="State of deployed frontend services."
     )
+    deployed_services: Optional[List[dict]] = Field(
+        default_factory=list, description="Snapshot of services deployed in docker-compose."
+    )
+    deployed_infra_deps: Optional[List[dict]] = Field(
+        default_factory=list, description="Snapshot of infrastructure dependencies deployed."
+    )
 
     @classmethod
     def load(cls: Type["MonolithicDeploymentState"], path: Path) -> "MonolithicDeploymentState":

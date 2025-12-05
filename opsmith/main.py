@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import Annotated, Optional, Type, Union
+from typing import Annotated, List, Optional, Tuple, Type, Union
 
 import inquirer
 import logfire
@@ -304,6 +304,72 @@ def setup(ctx: typer.Context):
     deployment_config.save(ctx.obj["deployments_path"])
 
 
+def _collect_domain_configuration(
+    deployment_config: DeploymentConfig,
+    selected_env: Optional[DeploymentEnvironment] = None,
+) -> Tuple[Optional[str], List[DomainInfo]]:
+    """
+    Collects domain information for services that require domains.
+
+    Returns:
+        Tuple of (domain_email, list of DomainInfo objects)
+    """
+    services_with_domains_types = [
+        s
+        for s in deployment_config.services
+        if s.service_type
+        in [
+            ServiceTypeEnum.BACKEND_API,
+            ServiceTypeEnum.FULL_STACK,
+            ServiceTypeEnum.FRONTEND,
+        ]
+    ]
+    # Get current domain mappings
+    domains_map = {d.service_name_slug: d for d in selected_env.domains} if selected_env else {}
+
+    # Find services without domains
+    services_needing_domains = [
+        s for s in services_with_domains_types if s.name_slug not in domains_map
+    ]
+
+    domains = []
+    domain_email = selected_env.domain_email if selected_env else None
+
+    if services_needing_domains:
+        print("\n[bold]Please provide domain information for your services:[/bold]")
+
+        # Collect email
+        if selected_env and not selected_env.domain_email:
+            domain_email_questions = [
+                inquirer.Text(
+                    "domain_email",
+                    message="Enter email for SSL (e.g., for Let's Encrypt)",
+                    validate=lambda _, x: "@" in x,
+                ),
+            ]
+            domain_email_answers = inquirer.prompt(domain_email_questions)
+            domain_email = domain_email_answers["domain_email"]
+
+        # Collect domains
+        for service in services_needing_domains:
+            domain_questions = [
+                inquirer.Text(
+                    "domain_name",
+                    message=f"Enter domain name for service '{service.name_slug}'",
+                    validate=lambda _, x: len(x.strip()) > 0,
+                ),
+            ]
+            domain_answers = inquirer.prompt(domain_questions)
+            domains.append(
+                DomainInfo(
+                    service_name_slug=service.name_slug,
+                    domain_name=domain_answers["domain_name"],
+                )
+            )
+
+    return domain_email, domains
+
+
 @app.command()
 def deploy(ctx: typer.Context):
     """Deploy the application to a specified environment."""
@@ -389,47 +455,8 @@ def deploy(ctx: typer.Context):
         selected_env_name = new_env_answers["env_name"].strip()
         selected_strategy = new_env_answers["strategy"]
 
-        domains = []
-        domain_email = None
-        services_with_domains = list(
-            filter(
-                lambda s: s.service_type
-                in [
-                    ServiceTypeEnum.BACKEND_API,
-                    ServiceTypeEnum.FULL_STACK,
-                    ServiceTypeEnum.FRONTEND,
-                ],
-                deployment_config.services,
-            )
-        )
-
-        if services_with_domains:
-            print("\n[bold]Please provide domain information for your services:[/bold]")
-            domain_email_questions = [
-                inquirer.Text(
-                    "domain_email",
-                    message="Enter email for SSL (e.g., for Let's Encrypt)",
-                    validate=lambda _, x: "@" in x,
-                ),
-            ]
-            domain_email_answers = inquirer.prompt(domain_email_questions)
-            domain_email = domain_email_answers["domain_email"]
-
-            for service in services_with_domains:
-                domain_questions = [
-                    inquirer.Text(
-                        "domain_name",
-                        message=f"Enter domain name for service '{service.name_slug}'",
-                        validate=lambda _, x: len(x.strip()) > 0,
-                    ),
-                ]
-                domain_answers = inquirer.prompt(domain_questions)
-                domains.append(
-                    DomainInfo(
-                        service_name_slug=service.name_slug,
-                        domain_name=domain_answers["domain_name"],
-                    )
-                )
+        # Collect domain information using helper method
+        domain_email, domains = _collect_domain_configuration(deployment_config)
 
         new_env = DeploymentEnvironment(
             name=selected_env_name,
@@ -460,7 +487,7 @@ def deploy(ctx: typer.Context):
         inquirer.List(
             "action",
             message=f"What would you like to do with the '{selected_env_name}' environment?",
-            choices=["release", "run", "delete", "exit"],
+            choices=["release", "update", "run", "delete", "exit"],
             default="release",
         )
     ]
@@ -479,6 +506,23 @@ def deploy(ctx: typer.Context):
     if selected_action == "release":
         deployment_strategy.release(deployment_config, selected_env)
         print(f"\nDeployment to '{selected_env_name}' environment completed.")
+    elif selected_action == "update":
+        # Collect domains using the helper
+        new_domain_email, new_domains = _collect_domain_configuration(
+            deployment_config, selected_env
+        )
+
+        # Update environment
+        selected_env.domains.extend(new_domains)
+        selected_env.domain_email = new_domain_email
+
+        # Save updated config
+        deployment_config.save(ctx.obj["deployments_path"])
+        print("[bold green]Domain configuration updated.[/bold green]")
+
+        # Now call update with complete domain information
+        deployment_strategy.update(deployment_config, selected_env)
+        print(f"\nConfiguration update for '{selected_env_name}' environment completed.")
     elif selected_action == "run":
         runnable_services = [
             s for s in deployment_config.services if s.service_type != ServiceTypeEnum.FRONTEND

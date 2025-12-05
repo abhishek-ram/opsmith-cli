@@ -237,6 +237,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         environment: DeploymentEnvironment,
         images: Dict[str, str],
         environment_state: MonolithicDeploymentState,
+        existing_env_content: Optional[str] = None,
     ):
         base_compose_template = self.docker_compose_snippets_env.get_template("base.yml")
         base_compose = base_compose_template.render(app_name=deployment_config.app_name_slug)
@@ -289,7 +290,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
 
         services_info_yaml = yaml.dump(services_info)
 
-        confirmed_env_content = "N/A"
+        confirmed_env_content = existing_env_content or "N/A"
         is_successful = False
         docker_compose_content = None
         messages = []
@@ -371,6 +372,112 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                     f"Dockerfile validation {'succeeded' if is_successful else 'failed'} "
                     f"with reason: \n {reason}."
                 )
+
+    @staticmethod
+    def _detect_configuration_changes(
+        current_config: DeploymentConfig,
+        deployed_state: MonolithicDeploymentState,
+    ) -> Tuple[bool, Dict[str, List]]:
+        """
+        Detects changes between current config and deployed state.
+
+        Returns:
+            (has_changes, change_details)
+        """
+        changes = {
+            "services_added": [],
+            "services_removed": [],
+            "services_modified": [],
+            "infra_added": [],
+            "infra_removed": [],
+            "infra_modified": [],
+        }
+
+        # Get deployed snapshots
+        deployed_services = deployed_state.deployed_services or []
+        deployed_infra_deps = deployed_state.deployed_infra_deps or []
+
+        # Create lookup maps for deployed state
+        deployed_services_map = {s["name_slug"]: s for s in deployed_services}
+        deployed_infra_map = {i["provider"]: i for i in deployed_infra_deps}
+
+        # Create lookup maps for current config
+        current_services_map = {
+            s.name_slug: s.model_dump(mode="json") for s in current_config.services
+        }
+        current_infra_map = {
+            i.provider.value: i.model_dump(mode="json") for i in current_config.infra_deps
+        }
+
+        # Detect service changes
+        for name_slug, current_service in current_services_map.items():
+            if name_slug not in deployed_services_map:
+                changes["services_added"].append(name_slug)
+            else:
+                deployed_service = deployed_services_map[name_slug]
+                # Check for modifications (port, service_type, env_vars)
+                if (
+                    current_service.get("service_port") != deployed_service.get("service_port")
+                    or current_service.get("service_type") != deployed_service.get("service_type")
+                    or current_service.get("env_vars") != deployed_service.get("env_vars")
+                ):
+                    changes["services_modified"].append(name_slug)
+
+        for name_slug in deployed_services_map:
+            if name_slug not in current_services_map:
+                changes["services_removed"].append(name_slug)
+
+        # Detect infrastructure changes
+        for provider, current_infra in current_infra_map.items():
+            if provider not in deployed_infra_map:
+                changes["infra_added"].append(provider)
+            else:
+                deployed_infra = deployed_infra_map[provider]
+                # Check for version changes
+                if current_infra.get("version") != deployed_infra.get("version"):
+                    changes["infra_modified"].append(provider)
+
+        for provider in deployed_infra_map:
+            if provider not in current_infra_map:
+                changes["infra_removed"].append(provider)
+
+        # Determine if there are any changes
+        has_changes = any(
+            changes["services_added"]
+            or changes["services_removed"]
+            or changes["services_modified"]
+            or changes["infra_added"]
+            or changes["infra_removed"]
+            or changes["infra_modified"]
+        )
+
+        return has_changes, changes
+
+    @staticmethod
+    def _get_frontend_services(deployment_config: DeploymentConfig) -> List[ServiceInfo]:
+        """Returns list of frontend services."""
+        return [s for s in deployment_config.services if s.service_type == ServiceTypeEnum.FRONTEND]
+
+    @staticmethod
+    def _get_backend_services(deployment_config: DeploymentConfig) -> List[ServiceInfo]:
+        """Returns list of non-frontend services."""
+        return [s for s in deployment_config.services if s.service_type != ServiceTypeEnum.FRONTEND]
+
+    @staticmethod
+    def _save_deployment_state(
+        env_state: MonolithicDeploymentState,
+        deployment_config: DeploymentConfig,
+        env_state_path: Path,
+    ):
+        """Saves deployment state with current config snapshots."""
+        env_state.deployed_services = [
+            s.model_dump(mode="json") for s in deployment_config.services
+        ]
+        env_state.deployed_infra_deps = [
+            i.model_dump(mode="json") for i in deployment_config.infra_deps
+        ]
+        env_state.save(env_state_path)
+        print(f"\n[bold green]Deployment state saved to {env_state_path}[/bold green]")
 
     @staticmethod
     def _prompt_for_build_env_vars(
@@ -605,6 +712,55 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             print("[bold red]DNS configuration not confirmed. Aborting deployment.[/bold red]")
             raise MonolithicDeploymentError("User did not confirm DNS configuration.")
 
+    def _deploy_frontend_service(
+        self,
+        deployment_config: DeploymentConfig,
+        environment: DeploymentEnvironment,
+        domain_info: DomainInfo,
+        cloud_provider: BaseCloudProvider,
+        service: ServiceInfo,
+        env_state: MonolithicDeploymentState,
+    ):
+        """Deploys a frontend service to a new deployment environment."""
+        cdn_part1_outputs = self._create_frontend_bucket_cert(
+            deployment_config, environment, service, domain_info, cloud_provider
+        )
+
+        cdn_part2_outputs = self._create_frontend_cdn(
+            deployment_config,
+            environment,
+            service,
+            domain_info,
+            cloud_provider,
+            cdn_part1_outputs,
+        )
+        cdn_outputs = {**cdn_part1_outputs, **cdn_part2_outputs}
+
+        build_env_vars = self._prompt_for_build_env_vars(service)
+        cdn_state = FrontendCDNState(
+            service_name_slug=service.name_slug,
+            domain_name=domain_info.domain_name,
+            bucket_name=cdn_outputs.get("bucket_name"),
+            cdn_domain_name=cdn_outputs.get("cdn_domain_name"),
+            cdn_ip_address=cdn_outputs.get("cdn_ip_address"),
+            cdn_distribution_id=cdn_outputs.get("cdn_distribution_id"),
+            cdn_url_map=cdn_outputs.get("cdn_url_map"),
+            certificate_id=cdn_outputs.get("certificate_id"),
+            build_env_vars=build_env_vars,
+        )
+        env_state.frontend_cdn.append(cdn_state)
+
+        self._build_and_upload_frontend_assets(
+            service,
+            cloud_provider,
+            environment,
+            cdn_state,
+        )
+        print(
+            "\n[bold green]Your website is available at:"
+            f" https://{domain_info.domain_name}[/bold green]"
+        )
+
     def deploy(
         self,
         deployment_config: DeploymentConfig,
@@ -624,12 +780,8 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         :type environment: DeploymentEnvironment
         :return: None
         """
-        frontend_services = [
-            s for s in deployment_config.services if s.service_type == ServiceTypeEnum.FRONTEND
-        ]
-        other_services = [
-            s for s in deployment_config.services if s.service_type != ServiceTypeEnum.FRONTEND
-        ]
+        frontend_services = self._get_frontend_services(deployment_config)
+        other_services = self._get_backend_services(deployment_config)
 
         cloud_provider = environment.cloud_provider_instance
         env_state_path = self._get_env_state_path(environment.name)
@@ -647,44 +799,8 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                         " Skipping.[/bold red]"
                     )
                     continue
-
-                cdn_part1_outputs = self._create_frontend_bucket_cert(
-                    deployment_config, environment, service, domain_info, cloud_provider
-                )
-
-                cdn_part2_outputs = self._create_frontend_cdn(
-                    deployment_config,
-                    environment,
-                    service,
-                    domain_info,
-                    cloud_provider,
-                    cdn_part1_outputs,
-                )
-                cdn_outputs = {**cdn_part1_outputs, **cdn_part2_outputs}
-
-                build_env_vars = self._prompt_for_build_env_vars(service)
-                cdn_state = FrontendCDNState(
-                    service_name_slug=service.name_slug,
-                    domain_name=domain_info.domain_name,
-                    bucket_name=cdn_outputs.get("bucket_name"),
-                    cdn_domain_name=cdn_outputs.get("cdn_domain_name"),
-                    cdn_ip_address=cdn_outputs.get("cdn_ip_address"),
-                    cdn_distribution_id=cdn_outputs.get("cdn_distribution_id"),
-                    cdn_url_map=cdn_outputs.get("cdn_url_map"),
-                    certificate_id=cdn_outputs.get("certificate_id"),
-                    build_env_vars=build_env_vars,
-                )
-                env_state.frontend_cdn.append(cdn_state)
-
-                self._build_and_upload_frontend_assets(
-                    service,
-                    cloud_provider,
-                    environment,
-                    cdn_state,
-                )
-                print(
-                    "\n[bold green]Your website is available at:"
-                    f" https://{domain_info.domain_name}[/bold green]"
+                self._deploy_frontend_service(
+                    deployment_config, environment, domain_info, cloud_provider, service, env_state
                 )
 
         if other_services:
@@ -738,8 +854,8 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                     f" https://{domain.domain_name}[/bold green]"
                 )
 
-        env_state.save(env_state_path)
-        print(f"Monolithic deployment state saved to {env_state_path}")
+        # Save config snapshots for change detection
+        self._save_deployment_state(env_state, deployment_config, env_state_path)
 
     def release(
         self,
@@ -753,9 +869,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         state_updated = False
 
         # Release frontend services
-        frontend_services = [
-            s for s in deployment_config.services if s.service_type == ServiceTypeEnum.FRONTEND
-        ]
+        frontend_services = self._get_frontend_services(deployment_config)
         if frontend_services:
             print("\n[bold blue]Releasing frontend services...[/bold blue]")
             cdn_state_map = {cdn.service_name_slug: cdn for cdn in env_state.frontend_cdn}
@@ -788,9 +902,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                 )
 
         # Release other services
-        other_services = [
-            s for s in deployment_config.services if s.service_type != ServiceTypeEnum.FRONTEND
-        ]
+        other_services = self._get_backend_services(deployment_config)
 
         if other_services:
             if env_state.virtual_machine:
@@ -1025,3 +1137,169 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             "main.yml",
             extra_vars=extra_vars,
         )
+
+    def update(
+        self,
+        deployment_config: DeploymentConfig,
+        environment: DeploymentEnvironment,
+    ):
+        """
+        Updates service configuration for an existing deployment.
+
+        Handles:
+        - Service additions/removals
+        - Infrastructure dependency changes
+        - Port/configuration changes
+        """
+        print("\n[bold blue]Starting configuration update...[/bold blue]")
+
+        # Load existing state
+        env_state_path = self._get_env_state_path(environment.name)
+        if not env_state_path.exists():
+            print(
+                "[bold red]No deployment found for this environment. Please run 'deploy'"
+                " first.[/bold red]"
+            )
+            raise MonolithicDeploymentError(
+                f"No state file found at {env_state_path}. Run 'deploy' first."
+            )
+
+        env_state = MonolithicDeploymentState.load(env_state_path)
+
+        # Detect changes
+        has_changes, changes = self._detect_configuration_changes(deployment_config, env_state)
+
+        if not has_changes:
+            print("[bold green]No configuration changes detected. Nothing to update.[/bold green]")
+            return
+
+        # Display detected changes
+        print("\n[bold]Configuration changes detected:[/bold]")
+        if changes["services_added"]:
+            print(f"  [green]Services added:[/green] {', '.join(changes['services_added'])}")
+        if changes["services_removed"]:
+            print(f"  [red]Services removed:[/red] {', '.join(changes['services_removed'])}")
+        if changes["services_modified"]:
+            print(
+                f"  [yellow]Services modified:[/yellow] {', '.join(changes['services_modified'])}"
+            )
+        if changes["infra_added"]:
+            print(f"  [green]Infrastructure added:[/green] {', '.join(changes['infra_added'])}")
+        if changes["infra_removed"]:
+            print(f"  [red]Infrastructure removed:[/red] {', '.join(changes['infra_removed'])}")
+        if changes["infra_modified"]:
+            print(
+                "  [yellow]Infrastructure modified:[/yellow]"
+                f" {', '.join(changes['infra_modified'])}"
+            )
+
+        # Warn about infrastructure changes
+        infra_changes = (
+            changes["infra_added"] or changes["infra_removed"] or changes["infra_modified"]
+        )
+        if infra_changes:
+            print(
+                "\n[bold yellow]WARNING: Infrastructure changes detected. Existing data in affected"
+                " services may be lost.[/bold yellow]"
+            )
+            confirm_questions = [
+                inquirer.Confirm(
+                    "continue",
+                    message="Do you want to continue with the update?",
+                    default=False,
+                )
+            ]
+            confirm_answers = inquirer.prompt(confirm_questions)
+            if not confirm_answers or not confirm_answers.get("continue"):
+                print("[bold yellow]Update cancelled by user.[/bold yellow]")
+                return
+
+        cloud_provider = environment.cloud_provider_instance
+
+        # Handle frontend services
+        frontend_services = self._get_frontend_services(deployment_config)
+        if frontend_services:
+            print("\n[bold blue]Updating frontend services...[/bold blue]")
+            cdn_state_map = {cdn.service_name_slug: cdn for cdn in env_state.frontend_cdn}
+            domains_map = {d.service_name_slug: d for d in environment.domains}
+
+            for service in frontend_services:
+                cdn_state = cdn_state_map.get(service.name_slug)
+                if not cdn_state:
+                    # New frontend service - create CDN
+                    domain_info = domains_map.get(service.name_slug)
+                    if not domain_info:
+                        # This should not happen if main.py did its job
+                        print(
+                            f"[bold yellow]No domain configured for '{service.name_slug}'. "
+                            "Skipping CDN creation.[/bold yellow]"
+                        )
+                        continue
+                    self._deploy_frontend_service(
+                        deployment_config,
+                        environment,
+                        domain_info,
+                        cloud_provider,
+                        service,
+                        env_state,
+                    )
+                else:
+                    # Existing service - update build env vars and assets
+                    build_env_vars = self._prompt_for_build_env_vars(
+                        service, existing_vars=cdn_state.build_env_vars
+                    )
+                    if cdn_state.build_env_vars != build_env_vars:
+                        cdn_state.build_env_vars = build_env_vars
+
+                    self._build_and_upload_frontend_assets(
+                        service, cloud_provider, environment, cdn_state
+                    )
+                    print(
+                        f"[bold green]Frontend service '{service.name_slug}' updated"
+                        " successfully.[/bold green]"
+                    )
+
+        # Handle backend services
+        other_services = [
+            s for s in deployment_config.services if s.service_type != ServiceTypeEnum.FRONTEND
+        ]
+
+        if other_services:
+            if not env_state.virtual_machine:
+                print(
+                    "[bold yellow]No virtual machine provisioned for this environment. Cannot"
+                    " update backend services.[/bold yellow]"
+                )
+                return
+
+            print("\n[bold blue]Updating backend services...[/bold blue]")
+
+            # Rebuild and push images
+            images = self._build_and_push_images(
+                deployment_config, environment, env_state.registry_url
+            )
+
+            # Fetch existing .env file
+            env_file_path = f"/home/{env_state.virtual_machine.user}/app/.env"
+            fetched_files = self._fetch_remote_deployment_files(
+                deployment_config,
+                environment,
+                env_state.virtual_machine,
+                [env_file_path],
+            )
+            existing_env_content = fetched_files[0]
+
+            # Regenerate docker-compose with existing env as starting point
+            print("\n[bold blue]Regenerating docker-compose configuration...[/bold blue]")
+            self._generate_docker_compose(
+                deployment_config,
+                environment,
+                images,
+                env_state,
+                existing_env_content=existing_env_content,
+            )
+
+            print("[bold green]Backend services updated successfully.[/bold green]")
+
+        # Update state with new config snapshots
+        self._save_deployment_state(env_state, deployment_config, env_state_path)

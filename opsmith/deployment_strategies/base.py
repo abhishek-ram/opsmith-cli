@@ -476,3 +476,12 @@ class BaseDeploymentStrategy(abc.ABC):
     ):
         """Runs a command on a specific service."""
         raise NotImplementedError
+
+    @abc.abstractmethod
+    def update(
+        self,
+        deployment_config: DeploymentConfig,
+        environment: DeploymentEnvironment,
+    ):
+        """Updates service configuration for an existing deployment."""
+        raise NotImplementedError

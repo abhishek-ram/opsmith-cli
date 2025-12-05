@@ -193,8 +193,9 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
-# Aider
+# Local
 .aider*
+.DS_Store
 
 # Asciinema
 *.cast
