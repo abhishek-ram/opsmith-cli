@@ -123,7 +123,7 @@
               type: aws_cloudwatch_logs
               inputs:
                 - enrich_containers
-              region: ap-south-1
+              region: {{region}}
               group_name: {{ app_name }}-{{ environment_name }}
               stream_name: containers
               create_missing_group: true

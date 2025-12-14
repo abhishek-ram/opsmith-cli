@@ -6,7 +6,7 @@ from typing import List, Type
 from pydantic_ai import Agent, ModelRetry, RunContext
 
 from opsmith.models import BaseAiModel
-from opsmith.prompts import SYSTEM_PROMPT_V2
+from opsmith.prompts import SYSTEM_PROMPT
 from opsmith.utils import generate_secret_string
 
 
@@ -39,7 +39,7 @@ def build_agent(model_config: Type[BaseAiModel], instrument: bool = False) -> Ag
     agent = Agent(
         model=model_config.model_name_abs(),
         model_settings=model_config.get_model_settings(),
-        instructions=SYSTEM_PROMPT_V2,
+        instructions=SYSTEM_PROMPT,
         instrument=instrument,
         deps_type=AgentDeps,
     )

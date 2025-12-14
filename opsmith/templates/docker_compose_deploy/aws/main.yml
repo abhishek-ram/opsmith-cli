@@ -71,6 +71,11 @@
           fail:
             msg: "Failed to login to AWS ECR. Please check your credentials."
 
+    - name: Cleanup unused Docker images
+      ansible.builtin.command: docker image prune -af
+      become_user: "{{ ansible_user }}"
+      changed_when: true
+
     - name: Run docker-compose up
       community.docker.docker_compose_v2:
         project_src: "{{ dest_docker_compose | dirname }}"
