@@ -355,8 +355,6 @@ class BaseDeploymentStrategy(abc.ABC):
             **cloud_provider.provider_detail_dump,
             **virtual_machine_state.model_dump(mode="json"),
         }
-        # extra_vars.update(virtual_machine_state.model_dump(mode="json"))
-        # extra_vars.update(cloud_provider.provider_detail_dump)
 
         ansible_runner.run_playbook(
             "main.yml",

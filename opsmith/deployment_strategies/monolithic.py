@@ -543,7 +543,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             "build_dir": service.build_dir,
             "build_path": service.build_path,
             "bucket_name": cdn_state.bucket_name,
-            "project_root": self.src_dir,
+            "project_root": str(self.src_dir),
             "build_env_vars": cdn_state.build_env_vars,
             "cdn_distribution_id": cdn_state.cdn_distribution_id,
             "cdn_url_map": cdn_state.cdn_url_map,
