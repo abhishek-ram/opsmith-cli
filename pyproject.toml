@@ -1,6 +1,6 @@
 [project]
 name = "opsmith-cli"
-version = "0.4.2b"
+version = "0.4.3b"
 description = "Opsmith is an AI devops engineer in your terminal"
 readme = {file = "README.md", content-type = "text/markdown"}
 classifiers = [
@@ -16,28 +16,26 @@ classifiers = [
     "Topic :: Software Development",
 ]
 license = "GPL-3.0-only"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
-    "ansible>=10.7.0",
-    "black>=25.1.0",
-    "boto3-stubs==1.38.36",
-    "gitpython>=3.1.44",
-    "google-api-python-client>=2.175.0",
-    "google-cloud-compute>=1.31.0",
-    "google-cloud-resource-manager>=1.14.2",
-    "google-cloud-storage>=3.2.0",
-    "grep-ast>=0.9.0",
-    "inquirer>=3.4.0",
-    "jinja2>=3.1.6",
-    "networkx>=3.4.2",
-    "pick>=2.4.0",
-    "pydantic>=2.11.5",
-    "pydantic-ai[logfire]==1.27.0",
-    "python-dotenv>=1.1.0",
-    "pyyaml>=6.0.2",
-    "tqdm>=4.67.1",
-    "tree-sitter-language-pack>=0.7.3",
-    "typer>=0.16.0",
+    "ansible==12.3.0",
+    "gitpython==3.1.45",
+    "google-api-python-client==2.187.0",
+    "google-cloud-compute==1.40.0",
+    "google-cloud-resource-manager==1.15.0",
+    "google-cloud-storage==3.7.0",
+    "grep-ast==0.9.0",
+    "inquirer==3.4.1",
+    "jinja2==3.1.6",
+    "networkx==3.6.1",
+    "pick==2.4.0",
+    "pydantic==2.12.5",
+    "pydantic-ai==1.37.0",
+    "python-dotenv==1.2.1",
+    "pyyaml==6.0.3",
+    "tqdm==4.67.1",
+    "tree-sitter-language-pack==0.13.0",
+    "typer==0.20.1",
 ]
 
 [project.scripts]
@@ -59,6 +57,8 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "pytest>=8.4.1",
+    "black>=25.1.0",
+    "boto3-stubs==1.38.36",
 ]
 
 [tool.black]

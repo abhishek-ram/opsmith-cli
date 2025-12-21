@@ -25,4 +25,4 @@
         distribution_id: "{{ cdn_distribution_id }}"
         target_paths:
           - "/*"
-      when: cdn_distribution_id is defined and cdn_distribution_id
+      when: cdn_distribution_id is defined and cdn_distribution_id != ""
