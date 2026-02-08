@@ -14,6 +14,7 @@ from rich import print
 
 from opsmith.agent import AgentDeps
 from opsmith.cloud_providers.base import BaseCloudProvider, MachineType
+from opsmith.git_repo import GitRepo
 from opsmith.infra_provisioners.ansible_provisioner import AnsibleProvisioner
 from opsmith.infra_provisioners.terraform_provisioner import TerraformProvisioner
 from opsmith.settings import settings
@@ -105,6 +106,7 @@ class BaseDeploymentStrategy(abc.ABC):
         self.src_dir = src_dir
         self.deployments_path = src_dir.joinpath(settings.deployments_dir)
         self.templates_dir = Path(__file__).parent.parent / "templates"
+        self.git_repo = GitRepo(self.src_dir)
 
     def _get_env_state_path(self, environment_name: str) -> Path:
         return self.deployments_path / "environments" / environment_name / "state.yml"
@@ -176,54 +178,59 @@ class BaseDeploymentStrategy(abc.ABC):
             ServiceTypeEnum.BACKEND_WORKER,
         ]
 
-        for service in deployment_config.services:
-            if service.service_type not in buildable_service_types:
-                continue
+        with self.git_repo.git_archive_context() as clean_context_path:
+            for service in deployment_config.services:
+                if service.service_type not in buildable_service_types:
+                    continue
 
-            # This logic is from generate_dockerfiles
-            service_dir_slug = service.name_slug
-            dockerfile_path_abs = self.deployments_path / "docker" / service_dir_slug / "Dockerfile"
-
-            if not dockerfile_path_abs.exists():
-                print(
-                    f"[bold yellow]Dockerfile for {service_dir_slug} not found at"
-                    f" {dockerfile_path_abs}, skipping build.[/bold yellow]"
+                # This logic is from generate_dockerfiles
+                service_dir_slug = service.name_slug
+                dockerfile_path_abs = (
+                    self.deployments_path / "docker" / service_dir_slug / "Dockerfile"
                 )
-                continue
 
-            image_name_slug = service_dir_slug
+                if not dockerfile_path_abs.exists():
+                    print(
+                        f"[bold yellow]Dockerfile for {service_dir_slug} not found at"
+                        f" {dockerfile_path_abs}, skipping build.[/bold yellow]"
+                    )
+                    continue
 
-            print(f"\n[bold]Building and pushing image for {image_name_slug}...[/bold]")
+                image_name_slug = service_dir_slug
 
-            build_infra_path = (
-                self.deployments_path
-                / "environments"
-                / environment.name
-                / "docker_build_push"
-                / image_name_slug
-            )
+                print(f"\n[bold]Building and pushing image for {image_name_slug}...[/bold]")
 
-            ansible_runner = AnsibleProvisioner(working_dir=build_infra_path)
+                build_infra_path = (
+                    self.deployments_path
+                    / "environments"
+                    / environment.name
+                    / "docker_build_push"
+                    / image_name_slug
+                )
 
-            provider_name = environment.cloud_provider_detail.name.lower()
+                ansible_runner = AnsibleProvisioner(working_dir=build_infra_path)
 
-            extra_vars = {
-                "docker_path": str(self.agent_deps.src_dir),
-                "dockerfile_path": str(dockerfile_path_abs),
-                "image_name_slug": image_name_slug,
-                "image_tag_name": "latest",
-                "registry_url": registry_url,
-            }
-            extra_vars.update(environment.cloud_provider_instance.provider_detail_dump)
-            ansible_runner.copy_template("docker_build_push", provider_name)
-            outputs = ansible_runner.run_playbook("main.yml", extra_vars)
+                provider_name = environment.cloud_provider_detail.name.lower()
 
-            print(f"[green]Successfully built and pushed image for {image_name_slug}[/green]")
+                extra_vars = {
+                    "docker_path": str(clean_context_path),
+                    "dockerfile_path": str(dockerfile_path_abs),
+                    "image_name_slug": image_name_slug,
+                    "image_tag_name": "latest",
+                    "registry_url": registry_url,
+                }
+                extra_vars.update(environment.cloud_provider_instance.provider_detail_dump)
+                ansible_runner.copy_template("docker_build_push", provider_name)
+                outputs = ansible_runner.run_playbook("main.yml", extra_vars)
 
-            if "image_url" in outputs:
-                images[image_name_slug] = outputs["image_url"]
-            else:
-                print(f"[bold red]Could not determine image URL for {image_name_slug}[/bold red]")
+                print(f"[green]Successfully built and pushed image for {image_name_slug}[/green]")
+
+                if "image_url" in outputs:
+                    images[image_name_slug] = outputs["image_url"]
+                else:
+                    print(
+                        f"[bold red]Could not determine image URL for {image_name_slug}[/bold red]"
+                    )
 
         return images
 

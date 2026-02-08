@@ -906,22 +906,48 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
 
         if other_services:
             if env_state.virtual_machine:
-                self._build_and_push_images(deployment_config, environment, env_state.registry_url)
+                images = self._build_and_push_images(
+                    deployment_config, environment, env_state.registry_url
+                )
 
-                env_file_path = f"/home/{env_state.virtual_machine.user}/app/.env"
+                ansible_user = env_state.virtual_machine.user
+                env_file_path = f"/home/{ansible_user}/app/.env"
+                docker_compose_file_path = f"/home/{ansible_user}/app/docker-compose.yml"
                 fetched_files = self._fetch_remote_deployment_files(
                     deployment_config,
                     environment,
                     env_state.virtual_machine,
-                    [env_file_path],
+                    [env_file_path, docker_compose_file_path],
+                )
+                existing_env_content = fetched_files[0]
+                existing_compose_content = fetched_files[1]
+
+                docker_compose_content = DockerComposeContent(
+                    content=existing_compose_content,
+                    env_file_content=existing_env_content,
                 )
 
-                self._deploy_docker_compose(
-                    deployment_config,
-                    environment,
-                    env_state,
-                    fetched_files[0],
+                is_successful, reason, _, confirmed_env_content = (
+                    self._deploy_validate_docker_compose(
+                        deployment_config,
+                        environment,
+                        env_state,
+                        docker_compose_content,
+                    )
                 )
+
+                if is_successful:
+                    print("[bold green]Release deployed successfully.[/bold green]")
+                else:
+                    print(f"[red]Deployment validation failed:[/red] {reason}")
+                    print("\n[bold blue]Regenerating docker-compose configuration...[/bold blue]")
+                    self._generate_docker_compose(
+                        deployment_config,
+                        environment,
+                        images,
+                        env_state,
+                        existing_env_content=confirmed_env_content,
+                    )
             else:
                 # This can happen if only frontend was deployed
                 print(

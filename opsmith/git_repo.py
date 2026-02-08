@@ -1,3 +1,7 @@
+import io
+import tarfile
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import List
 
@@ -64,6 +68,18 @@ class GitRepo:
         # Construct absolute paths and filter out potential empty strings from split
         absolute_paths = [git_root / p for p in relative_paths if p]
         return absolute_paths
+
+    @contextmanager
+    def git_archive_context(self):
+        """Creates a clean build context from git-tracked files only."""
+        print("Creating build context from git-tracked files...")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            buf = io.BytesIO()
+            self.repo.archive(buf, format="tar")
+            buf.seek(0)
+            with tarfile.open(fileobj=buf) as tar:
+                tar.extractall(path=temp_dir)
+            yield Path(temp_dir)
 
     def ensure_gitignore(self):
         """Ensures that Terraform state files are included in .gitignore."""
