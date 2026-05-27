@@ -225,14 +225,13 @@ class DeploymentConfig(ServiceList):
                 return env
         raise ValueError(f"Environment '{name}' not found in the deployment configuration.")
 
-    def get_env_var_defaults(self) -> dict:
-        """Retrieves a dictionary of environment variable defaults."""
-        env_var_defaults = {}
+    def get_configured_env_vars(self) -> dict:
+        """Retrieves a dictionary of configured environment variable with defaults."""
+        env_vars = {}
         for service in self.services:
             for env_var in service.env_vars:
-                if env_var.default_value:
-                    env_var_defaults[env_var.key] = env_var.default_value
-        return env_var_defaults
+                env_vars[env_var.key] = env_var.default_value
+        return env_vars
 
     @classmethod
     def load(cls: Type["DeploymentConfig"], deployments_path: Path) -> Optional["DeploymentConfig"]:
