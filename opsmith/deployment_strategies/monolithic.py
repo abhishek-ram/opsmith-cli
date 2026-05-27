@@ -105,13 +105,16 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         # Parse env_file_content from LLM
         env_file_vars = dotenv_values(stream=StringIO(env_file_content))
 
-        env_defaults = deployment_config.get_env_var_defaults()
+        configured_env = deployment_config.get_configured_env_vars()
 
         # Prepare questions for inquirer
         questions = []
         for key, value in sorted(env_file_vars.items()):
+            # Exclude any custom env that is not configured
+            if key not in configured_env:
+                continue
             # Precedence: llm > code default
-            default_value = value or env_defaults.get(key)
+            default_value = value or configured_env[key]
             questions.append(
                 inquirer.Text(
                     name=key,
@@ -238,6 +241,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         images: Dict[str, str],
         environment_state: MonolithicDeploymentState,
         existing_env_content: Optional[str] = None,
+        initial_messages: Optional[list[ModelMessage]] = None,
     ):
         base_compose_template = self.docker_compose_snippets_env.get_template("base.yml")
         base_compose = base_compose_template.render(app_name=deployment_config.app_name_slug)
@@ -293,7 +297,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         confirmed_env_content = existing_env_content or "N/A"
         is_successful = False
         docker_compose_content = None
-        messages = []
+        messages = initial_messages or []
         for attempt in range(settings.max_docker_compose_gen_attempts):
             print(
                 "\n[bold blue]Generating docker-compose file, Attempt"
@@ -927,7 +931,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                     env_file_content=existing_env_content,
                 )
 
-                is_successful, reason, _, confirmed_env_content = (
+                is_successful, reason, validation_messages, confirmed_env_content = (
                     self._deploy_validate_docker_compose(
                         deployment_config,
                         environment,
@@ -947,6 +951,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                         images,
                         env_state,
                         existing_env_content=confirmed_env_content,
+                        initial_messages=validation_messages,
                     )
             else:
                 # This can happen if only frontend was deployed
