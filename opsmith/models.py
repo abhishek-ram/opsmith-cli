@@ -263,7 +263,7 @@ class GoogleGlaGemini25Pro(BaseAiModel):
 class GoogleGlaGemini3Pro(BaseAiModel):
     @classmethod
     def name(cls) -> str:
-        return "gemini-3-pro-preview"
+        return "gemini-3.1-pro-preview"
 
     @classmethod
     def provider(cls) -> str:
