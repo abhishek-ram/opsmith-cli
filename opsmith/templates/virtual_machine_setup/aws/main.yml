@@ -150,6 +150,12 @@
         groups: systemd-journal
         append: yes
 
+    - name: Start Vector service
+      ansible.builtin.service:
+        name: vector
+        state: started
+        enabled: yes
+
     - name: Create CloudWatch agent configuration
       ansible.builtin.copy:
         content: |
