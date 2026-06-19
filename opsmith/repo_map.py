@@ -8,6 +8,7 @@ import typer
 from grep_ast import TreeContext, filename_to_lang
 from grep_ast.tsl import get_language, get_parser
 from tqdm import tqdm
+from tree_sitter import Query, QueryCursor
 
 from opsmith.constants import ROOT_IMPORTANT_FILES
 from opsmith.git_repo import GitRepo
@@ -272,8 +273,8 @@ class RepoMap:
             return tags
 
         tree = parser_module.parse(bytes(code, "utf-8"))
-        query = language_module.query(query_scm_content)
-        captures = query.captures(tree.root_node)
+        query = Query(language_module, query_scm_content)
+        captures = QueryCursor(query).captures(tree.root_node)
 
         processed_tags = set()  # To avoid duplicate tags from different patterns
 
