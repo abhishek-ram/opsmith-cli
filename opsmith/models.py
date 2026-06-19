@@ -3,10 +3,13 @@ import os
 from importlib.metadata import entry_points
 from typing import Dict, List, Optional, Tuple, Type
 
-from google.genai.types import ThinkingConfigDict
+from google.genai.types import ThinkingConfigDict, ThinkingLevel
 from pydantic_ai.models.anthropic import AnthropicModelSettings
 from pydantic_ai.models.google import GoogleModelSettings
-from pydantic_ai.models.openai import OpenAIModelSettings
+from pydantic_ai.models.openai import (
+    OpenAIChatModelSettings,
+    OpenAIResponsesModelSettings,
+)
 from pydantic_ai.settings import ModelSettings
 from rich import print
 
@@ -100,13 +103,10 @@ class ModelRegistry:
     def _load_builtin_models(self):
         """Load built-in models"""
         for model_cls in [
-            OpenAIGPT41,
-            OpenAIGPTO3,
-            OpenAIGPT5,
-            AnthropicClaudeSonnet37,
-            AnthropicClaudeSonnet4,
-            AnthropicClaudeSonnet45,
-            GoogleGlaGemini25Pro,
+            OpenAIGPT55,
+            OpenAIGPT55Pro,
+            AnthropicClaudeSonnet46,
+            AnthropicClaudeOpus48,
             GoogleGlaGemini3Pro,
         ]:
             self.register(model_cls)
@@ -127,10 +127,10 @@ class ModelRegistry:
                 )
 
 
-class OpenAIGPT41(BaseAiModel):
+class OpenAIGPT55(BaseAiModel):
     @classmethod
     def name(cls) -> str:
-        return "gpt-4.1"
+        return "gpt-5.5"
 
     @classmethod
     def provider(cls) -> str:
@@ -143,17 +143,18 @@ class OpenAIGPT41(BaseAiModel):
     @classmethod
     def get_model_settings(cls) -> ModelSettings:
         """Returns model-specific settings."""
-        return OpenAIModelSettings()
+        return OpenAIChatModelSettings(openai_reasoning_effort="high")
 
 
-class OpenAIGPTO3(BaseAiModel):
+class OpenAIGPT55Pro(BaseAiModel):
     @classmethod
     def name(cls) -> str:
-        return "o3"
+        return "gpt-5.5-pro"
 
     @classmethod
     def provider(cls) -> str:
-        return "openai"
+        # Pro reasoning models are only served via the OpenAI Responses API.
+        return "openai-responses"
 
     @classmethod
     def api_key_prefix(cls) -> str:
@@ -162,32 +163,13 @@ class OpenAIGPTO3(BaseAiModel):
     @classmethod
     def get_model_settings(cls) -> ModelSettings:
         """Returns model-specific settings."""
-        return OpenAIModelSettings(openai_reasoning_effort="high")
+        return OpenAIResponsesModelSettings(openai_reasoning_effort="medium")
 
 
-class OpenAIGPT5(BaseAiModel):
+class AnthropicClaudeSonnet46(BaseAiModel):
     @classmethod
     def name(cls) -> str:
-        return "gpt-5"
-
-    @classmethod
-    def provider(cls) -> str:
-        return "openai"
-
-    @classmethod
-    def api_key_prefix(cls) -> str:
-        return "OPENAI"
-
-    @classmethod
-    def get_model_settings(cls) -> ModelSettings:
-        """Returns model-specific settings."""
-        return OpenAIModelSettings()
-
-
-class AnthropicClaudeSonnet37(BaseAiModel):
-    @classmethod
-    def name(cls) -> str:
-        return "claude-3-7-sonnet-20250219"
+        return "claude-sonnet-4-6"
 
     @classmethod
     def provider(cls) -> str:
@@ -200,13 +182,13 @@ class AnthropicClaudeSonnet37(BaseAiModel):
     @classmethod
     def get_model_settings(cls) -> ModelSettings:
         """Returns model-specific settings."""
-        return AnthropicModelSettings()
+        return AnthropicModelSettings(anthropic_effort="high")
 
 
-class AnthropicClaudeSonnet4(BaseAiModel):
+class AnthropicClaudeOpus48(BaseAiModel):
     @classmethod
     def name(cls) -> str:
-        return "claude-sonnet-4-20250514"
+        return "claude-opus-4-8"
 
     @classmethod
     def provider(cls) -> str:
@@ -219,45 +201,7 @@ class AnthropicClaudeSonnet4(BaseAiModel):
     @classmethod
     def get_model_settings(cls) -> ModelSettings:
         """Returns model-specific settings."""
-        return AnthropicModelSettings()
-
-
-class AnthropicClaudeSonnet45(BaseAiModel):
-    @classmethod
-    def name(cls) -> str:
-        return "claude-sonnet-4-5-20250929"
-
-    @classmethod
-    def provider(cls) -> str:
-        return "anthropic"
-
-    @classmethod
-    def api_key_prefix(cls) -> str:
-        return "ANTHROPIC"
-
-    @classmethod
-    def get_model_settings(cls) -> ModelSettings:
-        """Returns model-specific settings."""
-        return AnthropicModelSettings()
-
-
-class GoogleGlaGemini25Pro(BaseAiModel):
-    @classmethod
-    def name(cls) -> str:
-        return "gemini-2.5-pro"
-
-    @classmethod
-    def provider(cls) -> str:
-        return "google-gla"
-
-    @classmethod
-    def api_key_prefix(cls) -> str:
-        return "GEMINI"
-
-    @classmethod
-    def get_model_settings(cls) -> ModelSettings:
-        """Returns model-specific settings."""
-        return GoogleModelSettings(google_thinking_config=ThinkingConfigDict(thinking_budget=-1))
+        return AnthropicModelSettings(anthropic_effort="medium")
 
 
 class GoogleGlaGemini3Pro(BaseAiModel):
@@ -276,7 +220,9 @@ class GoogleGlaGemini3Pro(BaseAiModel):
     @classmethod
     def get_model_settings(cls) -> ModelSettings:
         """Returns model-specific settings."""
-        return GoogleModelSettings(google_thinking_config=ThinkingConfigDict(thinking_level="HIGH"))
+        return GoogleModelSettings(
+            google_thinking_config=ThinkingConfigDict(thinking_level=ThinkingLevel.HIGH)
+        )
 
 
 MODEL_REGISTRY = ModelRegistry()
