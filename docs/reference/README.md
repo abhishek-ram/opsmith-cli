@@ -9,6 +9,6 @@ The boundary with [`specs/`](../specs/) is tense, not subject. A spec describes 
 ## What is not here
 
 - User-facing installation and usage: the repository [`README.md`](../../README.md).
-- Engineering conventions and project layout: [`CONVENTIONS.md`](../../CONVENTIONS.md), read by aider from the repository root.
+- Architecture, engineering conventions and project layout: [`CLAUDE.md`](../../CLAUDE.md), read from the repository root by the coding agents that work here.
 
 Nothing here yet. The first pages will most likely be the plugin contracts, which the migration's phase 0 and phase 2 change.

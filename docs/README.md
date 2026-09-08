@@ -1,6 +1,6 @@
 # Opsmith documentation
 
-Contributor-facing documentation. The user-facing README is at the repository root, and the engineering conventions are in [`CONVENTIONS.md`](../CONVENTIONS.md).
+Contributor-facing documentation. The user-facing README is at the repository root, and the architecture and engineering conventions are in [`CLAUDE.md`](../CLAUDE.md).
 
 Top-level directories are kinds of document, not projects. Inside them, every entry starts with the date it was written, `YYYY-MM-DD`, whether it is a file or a directory.
 

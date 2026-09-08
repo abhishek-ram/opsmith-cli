@@ -233,4 +233,4 @@ We welcome contributions to Opsmith! If you're interested in helping improve the
 -   **Suggesting Enhancements**: Have an idea for a new feature or an improvement to an existing one? We'd love to hear it. Open an issue to start a discussion.
 -   **Submitting Pull Requests**: If you'd like to contribute code, please fork the repository and submit a pull request. For major changes, it's best to discuss your idea in an issue first.
 
-When contributing, please follow our [engineering conventions](./CONVENTIONS.md) and ensure your code is formatted with `black`.
+When contributing, please follow our [engineering conventions](./CLAUDE.md) and ensure your code is formatted with `black`.

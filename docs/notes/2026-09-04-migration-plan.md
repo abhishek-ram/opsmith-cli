@@ -202,7 +202,7 @@ Every path under `.opsmith/` belongs to exactly one category, declared in code b
 
 ### Testing standard
 
-- Unit tests under `opsmith/tests/`, pytest, external calls mocked (per `CONVENTIONS.md`).
+- Unit tests under `opsmith/tests/`, pytest, external calls mocked (per `CLAUDE.md`).
 - Strategies get a `ProvisionerFactory` so tests inject fake Terraform and Ansible provisioners and assert call order and variables.
 - Golden-file tests for rendered artifacts (compose, env, backend blocks) under `opsmith/tests/golden/`.
 - Fixture repositories for detection under `opsmith/tests/fixtures/repos/` (phase 5).
