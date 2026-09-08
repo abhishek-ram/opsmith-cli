@@ -17,10 +17,7 @@ def repomap(ctx: typer.Context) -> Optional[Dict]:
     state: CliState = ctx.obj
     print("Generating repo map now...")
 
-    repo_mapper = RepoMap(
-        src_dir=state.src_dir,
-        verbose=state.verbose,
-    )
+    repo_mapper = RepoMap(ctx=state.context)
     repo_map_str = repo_mapper.get_repo_map()
 
     # The map is this command's payload, so in JSON mode it belongs in the envelope rather

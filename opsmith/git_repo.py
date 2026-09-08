@@ -3,26 +3,28 @@ import tarfile
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import git
-from rich import print
 
 from opsmith.core.errors import NotAGitRepository
+from opsmith.core.events import STEP_BUILD, STEP_SETUP, EventSink, resolve_sink
 
 
 class GitRepo:
-    def __init__(self, root_dir: Path):
+    def __init__(self, root_dir: Path, events: Optional[EventSink] = None):
         """
         Initialize a Git repository object for the specified directory, or its parent directories
         if it is a subdirectory, ensuring it belongs to an actual Git repository.
 
         :param root_dir: The root directory or subdirectory intended for Git repository initialization.
         :type root_dir: Path
+        :param events: Sink to report progress to. Defaults to discarding it.
 
         :raises NotAGitRepository: If the specified directory or its parent directories do not
             contain a valid Git repository.
         """
+        self.events = resolve_sink(events)
         try:
             # Initialize repo object, searching upwards from root_dir if it's a subdirectory
             self.repo = git.Repo(str(root_dir), search_parent_directories=True)
@@ -77,7 +79,7 @@ class GitRepo:
     @contextmanager
     def git_archive_context(self):
         """Creates a clean build context from git-tracked files only."""
-        print("Creating build context from git-tracked files...")
+        self.events.log(STEP_BUILD, "Creating build context from git-tracked files...")
         with tempfile.TemporaryDirectory() as temp_dir:
             buf = io.BytesIO()
             self.repo.archive(buf, format="tar")
@@ -113,7 +115,4 @@ class GitRepo:
         with open(gitignore_path, "a", encoding="utf-8") as f:
             f.write(ignore_block_str)
 
-        print(
-            "[bold green].gitignore has been updated to ignore Terraform state files.\n[/bold"
-            " green]"
-        )
+        self.events.log(STEP_SETUP, ".gitignore has been updated to ignore Terraform state files.")

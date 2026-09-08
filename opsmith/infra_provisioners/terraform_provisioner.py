@@ -1,19 +1,33 @@
+"""Runs terraform in a working directory prepared from a template."""
+
 import json
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from rich import print
-
+from opsmith.core.errors import TerraformFailed
+from opsmith.core.events import EventSink
 from opsmith.infra_provisioners.base_provisioner import BaseInfrastructureProvisioner
 
 
 class TerraformProvisioner(BaseInfrastructureProvisioner):
-    """A wrapper for running TerraformProvisioner commands."""
+    """A wrapper for running terraform commands."""
 
-    def __init__(self, working_dir: Path):
+    def __init__(self, working_dir: Path, events: EventSink, step: str, templates_dir: Path):
+        """
+        :param working_dir: Directory the terraform configuration lives and runs in.
+        :param events: Sink the streamed output is reported to.
+        :param step: The step name every event from this provisioner carries.
+        :param templates_dir: Root of the template tree to copy configurations from.
+        """
         super().__init__(
-            working_dir=working_dir, command_name="TerraformProvisioner", executable="terraform"
+            working_dir=working_dir,
+            command_name="Terraform",
+            executable="terraform",
+            events=events,
+            step=step,
+            templates_dir=templates_dir,
+            error_class=TerraformFailed,
         )
 
     @staticmethod
@@ -25,7 +39,7 @@ class TerraformProvisioner(BaseInfrastructureProvisioner):
             vars_list.extend(["-var", f"{key}={value}"])
 
         tf_env_vars = {}
-        for key, value in env_vars.items() or {}:
+        for key, value in (env_vars or {}).items():
             tf_env_vars[f"TF_VAR_{key}"] = str(value)
 
         return vars_list, tf_env_vars
@@ -51,7 +65,12 @@ class TerraformProvisioner(BaseInfrastructureProvisioner):
         self._run_command(command, env=tf_env_vars)
 
     def get_output(self) -> Dict[str, Any]:
-        """Retrieves TerraformProvisioner outputs from the working directory."""
+        """
+        Retrieves terraform outputs from the working directory.
+
+        :return: The output names mapped to their values.
+        :raises TerraformFailed: terraform is missing, failed, or wrote something that is not JSON.
+        """
         try:
             result = subprocess.run(
                 ["terraform", "output", "-json"],
@@ -61,20 +80,30 @@ class TerraformProvisioner(BaseInfrastructureProvisioner):
                 check=True,
                 encoding="utf-8",
             )
-            outputs = json.loads(result.stdout)
-            return {key: value["value"] for key, value in outputs.items()}
         except FileNotFoundError:
-            print(
-                "[bold red]Error: 'terraform' command not found. Please ensure TerraformProvisioner"
-                " is installed and in your PATH.[/bold red]"
+            raise TerraformFailed(
+                "'terraform' command not found.",
+                hint="Install Terraform and make sure 'terraform' is on your PATH.",
+                details={"executable": "terraform"},
             )
-            raise
-        except subprocess.CalledProcessError as e:
-            print(
-                "[bold red]Failed to get TerraformProvisioner outputs. Exit code:"
-                f" {e.returncode}[/bold red]\n{e.stderr}"
+        except subprocess.CalledProcessError as err:
+            raise TerraformFailed(
+                f"Failed to read Terraform outputs. Exit code: {err.returncode}",
+                hint=f"Re-run 'terraform output -json' in {self.working_dir} to see the failure.",
+                details={
+                    "command": "terraform output -json",
+                    "working_dir": str(self.working_dir),
+                    "returncode": err.returncode,
+                    "output_tail": (err.stderr or "").strip(),
+                },
             )
-            raise
+
+        try:
+            outputs = json.loads(result.stdout)
         except json.JSONDecodeError:
-            print("[bold red]Failed to parse TerraformProvisioner output as JSON.[/bold red]")
-            raise
+            raise TerraformFailed(
+                "Failed to parse Terraform outputs as JSON.",
+                details={"working_dir": str(self.working_dir), "output_tail": result.stdout[-500:]},
+            )
+
+        return {key: value["value"] for key, value in outputs.items()}

@@ -24,16 +24,35 @@ from opsmith.cli.output import (
     BaseRenderer,
     OutputFormat,
     TextRenderer,
+    build_logo,
     build_renderer,
     command_name,
 )
 from opsmith.cli.state import CliState
+from opsmith.cloud_providers import CLOUD_PROVIDER_REGISTRY
+from opsmith.core.context import OpsmithContext
 from opsmith.core.errors import EXIT_CODES, OpsmithError
+from opsmith.core.events import EventSink
+from opsmith.core.provisioners import ProvisionerFactory
+from opsmith.deployment_strategies import DEPLOYMENT_STRATEGY_REGISTRY
 from opsmith.models import MODEL_REGISTRY, BaseAiModel
 from opsmith.settings import settings
-from opsmith.utils import build_logo, get_missing_external_dependencies
+from opsmith.utils import get_missing_external_dependencies
 
 app = typer.Typer(pretty_exceptions_show_locals=False)
+
+
+def _drain_registry_events(events: EventSink):
+    """
+    Replays what the plugin registries recorded while they loaded.
+
+    The registries are module level singletons that load their entry points at import time, long
+    before there is a renderer to report through, so they buffer and this hands the buffer on.
+
+    :param events: The sink to replay into.
+    """
+    for registry in (MODEL_REGISTRY, CLOUD_PROVIDER_REGISTRY, DEPLOYMENT_STRATEGY_REGISTRY):
+        registry.pending_events.drain_into(events)
 
 
 def _check_external_dependencies():
@@ -329,12 +348,19 @@ def main(
     AI Devops engineer in your terminal.
     """
     # The renderer is built before anything that can fail, so every error has somewhere to go.
+    # It is also the run's event sink, so progress and outcome go through one object.
     resolved_src_dir = Path(src_dir or os.getcwd())
+    renderer = build_renderer(output)
     ctx.obj = CliState(
-        src_dir=resolved_src_dir,
-        deployments_path=resolved_src_dir.joinpath(settings.deployments_dir),
+        context=OpsmithContext(
+            src_dir=resolved_src_dir,
+            deployments_path=resolved_src_dir.joinpath(settings.deployments_dir),
+            events=renderer,
+            provisioner_factory=ProvisionerFactory(events=renderer),
+            verbose=verbose,
+        ),
         output=output,
-        renderer=build_renderer(output),
+        renderer=renderer,
         verbose=verbose,
         non_interactive=non_interactive,
         inline_answers=list(answer or []),
@@ -346,20 +372,22 @@ def main(
     )
 
     if output is OutputFormat.JSON:
-        # rich resolves its global console per call, so this moves every rich print in the
-        # package to stderr and leaves stdout for the envelope alone. Part 0b replaces the
-        # core prints with events and makes the guarantee complete. `stderr=True` rather than
-        # `file=sys.stderr` so the stream is looked up per write instead of captured here.
+        # The core reports through events now, but the command modules under opsmith/cli/ still
+        # print directly until part 0d moves their prompts. rich resolves its global console per
+        # call, so this moves those prints to stderr and leaves stdout for the envelope alone.
+        # `stderr=True` rather than `file=sys.stderr` so the stream is looked up per write.
         rich.reconfigure(stderr=True)
 
     try:
         if output is OutputFormat.TEXT and sys.stdout.isatty():
-            print(build_logo())
+            renderer.render_logo(build_logo())
+
+        _drain_registry_events(renderer)
 
         if logfire_token:
             logfire.configure(token=logfire_token, scrubbing=False)
 
-        ctx.obj.agent = build_agent(model_config=model, instrument=bool(logfire_token))
+        ctx.obj.context.agent = build_agent(model_config=model, instrument=bool(logfire_token))
         _check_external_dependencies()
     except typer.Exit as exit_exc:
         _report_passthrough_exit(ctx, exit_exc.exit_code)

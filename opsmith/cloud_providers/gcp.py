@@ -1,4 +1,4 @@
-from typing import Literal, Type
+from typing import TYPE_CHECKING, Literal, Type
 
 import google.auth
 import inquirer
@@ -15,7 +15,10 @@ from opsmith.cloud_providers.base import (
     MachineTypeList,
 )
 from opsmith.core.errors import CloudCredentialsError
-from opsmith.utils import WaitingSpinner
+from opsmith.core.events import STEP_VM, EventSink
+
+if TYPE_CHECKING:
+    from opsmith.core.context import OpsmithContext
 
 GCP_REGION_DESCRIPTIONS = {
     "africa-south1": "Johannesburg, South Africa",
@@ -104,11 +107,18 @@ class GCPProvider(BaseCloudProvider):
         return self._credentials
 
     @staticmethod
-    def get_regions(project_id: str, credentials: Credentials) -> list[tuple[str, str]]:
+    def get_regions(
+        project_id: str, credentials: Credentials, events: EventSink
+    ) -> list[tuple[str, str]]:
         """
         Retrieves a list of available GCP regions using the GCP API.
+
+        :param project_id: The project to list regions for.
+        :param credentials: Credentials to call the API with.
+        :param events: Sink to report the wait on the GCP API to.
+        :return: (display name, region code) pairs, sorted by code.
         """
-        with WaitingSpinner(text="Fetching available regions from GCP Cloud Provider..."):
+        with events.waiting(STEP_VM, "Fetching available regions from GCP Cloud Provider..."):
             client = compute_v1.RegionsClient(credentials=credentials)
 
             request = compute_v1.ListRegionsRequest(project=project_id)
@@ -175,10 +185,13 @@ class GCPProvider(BaseCloudProvider):
         return MachineTypeList(machines=sorted_machines)
 
     @classmethod
-    def get_account_details(cls) -> GCPCloudDetail:
+    def get_account_details(cls, ctx: "OpsmithContext") -> GCPCloudDetail:
         """
         Retrieves structured GCP account details by listing available projects
         and prompting the user for selection.
+
+        :param ctx: The run's context, for reporting the wait on the GCP API.
+        :return: The project, region and zone to deploy into.
         """
         try:
             credentials, _ = google.auth.default()
@@ -196,7 +209,7 @@ class GCPProvider(BaseCloudProvider):
 
             selected_project_id = answers["project_id"]
 
-            regions = cls.get_regions(selected_project_id, credentials)
+            regions = cls.get_regions(selected_project_id, credentials, ctx.events)
             region_questions = [
                 inquirer.List(
                     "region",

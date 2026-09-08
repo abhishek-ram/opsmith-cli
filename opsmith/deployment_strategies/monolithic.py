@@ -1,7 +1,6 @@
 import base64
 import json
 import shutil
-import subprocess
 import time
 from io import StringIO
 from pathlib import Path
@@ -13,13 +12,25 @@ import yaml
 from dotenv import dotenv_values
 from pydantic import BaseModel, Field
 from pydantic_ai.messages import ModelMessage
-from rich import print
 
 from opsmith.cloud_providers.base import BaseCloudProvider, MachineType, MachineTypeList
-from opsmith.core.errors import LlmGaveUp, OpsmithError, UnknownEnvironment
+from opsmith.core.errors import (
+    AnsibleFailed,
+    LlmGaveUp,
+    OpsmithError,
+    UnknownEnvironment,
+)
+from opsmith.core.events import (
+    STEP_COMPOSE,
+    STEP_DESTROY,
+    STEP_DNS,
+    STEP_FRONTEND,
+    STEP_REGISTRY,
+    STEP_RUN,
+    STEP_SETUP,
+    STEP_VM,
+)
 from opsmith.deployment_strategies.base import BaseDeploymentStrategy
-from opsmith.infra_provisioners.ansible_provisioner import AnsibleProvisioner
-from opsmith.infra_provisioners.terraform_provisioner import TerraformProvisioner
 from opsmith.prompts import (
     DOCKER_COMPOSE_GENERATION_PROMPT_TEMPLATE,
     DOCKER_COMPOSE_LOG_VALIDATION_PROMPT_TEMPLATE,
@@ -35,7 +46,7 @@ from opsmith.types import (
     ServiceInfo,
     ServiceTypeEnum,
 )
-from opsmith.utils import WaitingSpinner, slugify
+from opsmith.utils import slugify
 
 
 class DockerComposeLogValidation(BaseModel):
@@ -94,8 +105,8 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             autoescape=False,
         )
 
-    @staticmethod
     def _confirm_env_vars(
+        self,
         deployment_config: DeploymentConfig,
         env_file_content: str,
     ) -> str:
@@ -124,7 +135,9 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             )
 
         # Prompt user
-        print("\n[bold]Please confirm or provide values for environment variables:[/bold]")
+        self.events.step(
+            STEP_COMPOSE, "Please confirm or provide values for environment variables:"
+        )
         answers = inquirer.prompt(questions)
 
         # For the .env file, merge with precedence: user answers > llm
@@ -155,13 +168,13 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         """
         Deploys the docker-compose stack and returns container logs for validation.
         """
-        print("\n[bold blue]Deploying docker-compose stack to the VM \n[/bold blue]")
+        self.events.step(STEP_COMPOSE, "Deploying docker-compose stack to the VM")
         ansible_user = environment_state.virtual_machine.user
         deploy_compose_path, docker_compose_path = self._get_deploy_docker_compose_path(environment)
 
-        ansible_runner = AnsibleProvisioner(working_dir=deploy_compose_path)
+        ansible_runner = self.provisioners.ansible(deploy_compose_path, step=STEP_COMPOSE)
         ansible_runner.copy_template(
-            "docker_compose_deploy", environment.cloud_provider_instance.name().lower()
+            "docker_compose_deploy", environment.cloud_provider_instance.name()
         )
 
         traefik_template = self.docker_compose_snippets_env.get_template("traefik.yml")
@@ -190,8 +203,10 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             if logs_b64:
                 return base64.b64decode(logs_b64.encode("ascii")).decode("utf-8")
             return ""
-        except subprocess.CalledProcessError as e:
-            return f"Ansible playbook execution failed.\nStdout:\n{e.stdout}\n\nStderr:\n{e.stderr}"
+        except AnsibleFailed as err:
+            # A failed deploy is not the end of the run: the output is fed back to the model so it
+            # can repair the compose file and try again.
+            return f"Ansible playbook execution failed.\n{err.details.get('output_tail', '')}"
 
     def _deploy_validate_docker_compose(
         self,
@@ -203,7 +218,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         deploy_compose_path, docker_compose_path = self._get_deploy_docker_compose_path(environment)
         with open(docker_compose_path, "w", encoding="utf-8") as f:
             f.write(docker_compose_content.content)
-        print(f"[bold green]docker-compose.yml generated at {docker_compose_path}[/bold green]")
+        self.events.log(STEP_COMPOSE, f"docker-compose.yml generated at {docker_compose_path}")
 
         confirmed_env_content = self._confirm_env_vars(
             deployment_config,
@@ -217,7 +232,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             confirmed_env_content,
         )
 
-        with WaitingSpinner("Validating deployment logs with LLM..."):
+        with self.events.waiting(STEP_COMPOSE, "Validating deployment logs with LLM..."):
             log_validation_prompt = DOCKER_COMPOSE_LOG_VALIDATION_PROMPT_TEMPLATE.format(
                 container_logs=deployment_output
             )
@@ -299,9 +314,12 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         docker_compose_content = None
         messages = initial_messages or []
         for attempt in range(settings.max_docker_compose_gen_attempts):
-            print(
-                "\n[bold blue]Generating docker-compose file, Attempt"
-                f" {attempt + 1}/{settings.max_docker_compose_gen_attempts}[/bold blue]"
+            self.events.step(
+                STEP_COMPOSE,
+                (
+                    "Generating docker-compose file, Attempt"
+                    f" {attempt + 1}/{settings.max_docker_compose_gen_attempts}"
+                ),
             )
             prompt = DOCKER_COMPOSE_GENERATION_PROMPT_TEMPLATE.format(
                 base_compose=base_compose,
@@ -316,7 +334,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                 if attempt == 0
                 else "Waiting for LLM to correct docker-compose.yml"
             )
-            with WaitingSpinner(text=spinner_text):
+            with self.events.waiting(STEP_COMPOSE, spinner_text):
                 docker_compose_response = self.agent.run_sync(
                     prompt,
                     output_type=DockerComposeContent,
@@ -326,9 +344,12 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                 docker_compose_content = docker_compose_response.output
 
             if docker_compose_content.give_up:
-                print(
-                    "[bold yellow]LLM indicated it cannot fix the docker-compose file"
-                    f" further: \n{docker_compose_content.reason}.[/bold yellow]"
+                self.events.warning(
+                    STEP_COMPOSE,
+                    (
+                        "LLM indicated it cannot fix the docker-compose file further:"
+                        f" {docker_compose_content.reason}."
+                    ),
                 )
                 break
 
@@ -339,15 +360,20 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             )
 
             if is_successful:
-                print("[bold green]Docker compose deployment was successful.[/bold green]")
+                self.events.log(STEP_COMPOSE, "Docker compose deployment was successful.")
                 break
-            print(f"[red]Docker compose validation 'failed' with reason[/red]: \n {reason}.")
+            self.events.warning(
+                STEP_COMPOSE, f"Docker compose validation failed with reason: {reason}."
+            )
 
             messages = docker_compose_response.new_messages() + validation_messages
         else:
-            print(
-                "[bold red]Failed to generate and deploy a valid docker-compose file after"
-                f" {settings.max_docker_compose_gen_attempts} attempts.[/bold red]"
+            self.events.warning(
+                STEP_COMPOSE,
+                (
+                    "Failed to generate and deploy a valid docker-compose file after"
+                    f" {settings.max_docker_compose_gen_attempts} attempts."
+                ),
             )
 
             while not is_successful:
@@ -372,9 +398,12 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                     )
                 )
 
-                print(
-                    f"Dockerfile validation {'succeeded' if is_successful else 'failed'} "
-                    f"with reason: \n {reason}."
+                self.events.log(
+                    STEP_COMPOSE,
+                    (
+                        "Docker compose validation"
+                        f" {'succeeded' if is_successful else 'failed'} with reason: {reason}."
+                    ),
                 )
 
     @staticmethod
@@ -481,20 +510,18 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             i.model_dump(mode="json") for i in deployment_config.infra_deps
         ]
         env_state.save(env_state_path)
-        print(f"\n[bold green]Deployment state saved to {env_state_path}[/bold green]")
 
-    @staticmethod
     def _prompt_for_build_env_vars(
-        service: ServiceInfo, existing_vars: Optional[dict] = None
+        self, service: ServiceInfo, existing_vars: Optional[dict] = None
     ) -> dict:
         """Prompt user for build environment variables for services."""
         service_vars = existing_vars.copy() if existing_vars else {}
         if not service.env_vars:
             return service_vars
 
-        print(
-            "\n[bold]Configuring build-time environment variables for service"
-            f" `{service.name_slug}`:[/bold]"
+        self.events.step(
+            STEP_FRONTEND,
+            f"Configuring build-time environment variables for service `{service.name_slug}`:",
         )
         for env_var in service.env_vars:
             default_val = service_vars.get(env_var.key, env_var.default_value)
@@ -526,8 +553,8 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         cdn_state: FrontendCDNState,
     ):
         """Builds frontend assets and uploads them to cloud storage."""
-        print(
-            f"\n[bold blue]Building and deploying assets for '{service.name_slug}'...[/bold blue]"
+        self.events.step(
+            STEP_FRONTEND, f"Building and deploying assets for '{service.name_slug}'..."
         )
 
         deploy_path = (
@@ -539,9 +566,8 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         )
         deploy_path.mkdir(parents=True, exist_ok=True)
 
-        ansible_runner = AnsibleProvisioner(working_dir=deploy_path)
-        provider_name = cloud_provider.name().lower()
-        ansible_runner.copy_template("frontend_deploy", provider_name)
+        ansible_runner = self.provisioners.ansible(deploy_path, step=STEP_FRONTEND)
+        ansible_runner.copy_template("frontend_deploy", cloud_provider.name())
         extra_vars = {
             "build_cmd": service.build_cmd,
             "build_dir": service.build_dir,
@@ -554,7 +580,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         }
         extra_vars.update(cloud_provider.provider_detail_dump)
         ansible_runner.run_playbook("main.yml", extra_vars=extra_vars, inventory="localhost")
-        print(f"[bold green]Assets for '{service.name_slug}' deployed successfully.[/bold green]")
+        self.events.log(STEP_FRONTEND, f"Assets for '{service.name_slug}' deployed successfully.")
 
     def _create_frontend_bucket_cert(
         self,
@@ -565,9 +591,12 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         cloud_provider: BaseCloudProvider,
     ):
         """Creates CDN part 1 (bucket and cert) and cloud storage for a frontend service."""
-        print(
-            "\n[bold blue]Creating CDN part 1 (bucket, cert) for service"
-            f" '{service_info.name_slug}'  '({domain_info.domain_name})'...[/bold blue]"
+        self.events.step(
+            STEP_FRONTEND,
+            (
+                f"Creating CDN part 1 (bucket, cert) for service '{service_info.name_slug}'"
+                f" '({domain_info.domain_name})'..."
+            ),
         )
         infra_path = (
             self.deployments_path
@@ -578,8 +607,8 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         )
         infra_path.mkdir(parents=True, exist_ok=True)
 
-        tf = TerraformProvisioner(working_dir=infra_path)
-        tf.copy_template("frontend_bucket_cert", cloud_provider.name().lower())
+        tf = self.provisioners.terraform(infra_path, step=STEP_FRONTEND)
+        tf.copy_template("frontend_bucket_cert", cloud_provider.name())
 
         variables = {
             "app_name": deployment_config.app_name_slug,
@@ -593,8 +622,8 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         dns_records_json = outputs.get("dns_records")
         if dns_records_json:
             self._confirm_dns_records(json.loads(dns_records_json))
-            print("\n[bold blue]Waiting 15 seconds for DNS propagation...[/bold blue]")
-            time.sleep(15)
+            with self.events.waiting(STEP_DNS, "Waiting 15 seconds for DNS propagation..."):
+                time.sleep(15)
 
         return outputs
 
@@ -608,9 +637,12 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         cdn_part1_outputs: dict,
     ):
         """Creates CDN part 2 (distribution) for a frontend service."""
-        print(
-            "\n[bold blue]Creating CDN part 2 (distribution) for service"
-            f" '{service_info.name_slug}'  '({domain_info.domain_name})'...[/bold blue]"
+        self.events.step(
+            STEP_FRONTEND,
+            (
+                f"Creating CDN part 2 (distribution) for service '{service_info.name_slug}'"
+                f" '({domain_info.domain_name})'..."
+            ),
         )
         infra_path = (
             self.deployments_path
@@ -621,8 +653,8 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         )
         infra_path.mkdir(parents=True, exist_ok=True)
 
-        tf = TerraformProvisioner(working_dir=infra_path)
-        tf.copy_template("frontend_cdn", cloud_provider.name().lower())
+        tf = self.provisioners.terraform(infra_path, step=STEP_FRONTEND)
+        tf.copy_template("frontend_cdn", cloud_provider.name())
 
         variables = {
             "app_name": deployment_config.app_name_slug,
@@ -646,7 +678,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         cloud_provider: BaseCloudProvider,
     ) -> MachineType:
         """Selects a virtual machine type for a new deployment environment."""
-        with WaitingSpinner(text="Fetching available instance types"):
+        with self.events.waiting(STEP_VM, "Fetching available instance types"):
             machine_type_list = cloud_provider.get_instance_types()
 
         services_yaml = yaml.dump([s.model_dump(mode="json") for s in deployment_config.services])
@@ -661,7 +693,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             machine_types_yaml=machine_types_yaml,
         )
 
-        with WaitingSpinner(text="Waiting for LLM to select machine types"):
+        with self.events.waiting(STEP_VM, "Waiting for LLM to select machine types"):
             response = self.agent.run_sync(
                 prompt, output_type=MachineTypeList, deps=self.agent_deps
             )
@@ -686,23 +718,31 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         answers = inquirer.prompt(questions)
         return answers["instance_type"]
 
-    @staticmethod
     def _confirm_dns_records(
+        self,
         dns_records: List[Dict[str, str]],
     ):
-        """Confirms the DNS records for the created service/s."""
-        print(
-            "\n[bold blue]Please configure the following DNS records for your domain:[/bold blue]"
+        """
+        Confirms the DNS records for the created service/s.
+
+        :param dns_records: The records the user has to create, each with a type, name and value.
+        :raises OpsmithError: The user did not confirm the records were created.
+        """
+        self.events.step(
+            STEP_DNS,
+            "Please configure the following DNS records for your domain:",
+            records=dns_records,
         )
 
         for record in dns_records:
-            print("\n[cyan]----------------------------------------[/cyan]")
+            lines = ["----------------------------------------"]
             if record.get("comment"):
-                print(f"  [bold]Comment:[/bold] {record.get('comment')}")
-            print(f"  [bold]Type:[/bold]    {record.get('type')} Record")
-            print(f"  [bold]Name:[/bold]    {record.get('name')}")
-            print(f"  [bold]Value:[/bold]   {record.get('value')}")
-            print("[cyan]----------------------------------------[/cyan]")
+                lines.append(f"  Comment: {record.get('comment')}")
+            lines.append(f"  Type:    {record.get('type')} Record")
+            lines.append(f"  Name:    {record.get('name')}")
+            lines.append(f"  Value:   {record.get('value')}")
+            lines.append("----------------------------------------")
+            self.events.log(STEP_DNS, "\n".join(lines), record=record)
 
         confirm_question = [
             inquirer.Confirm(
@@ -716,8 +756,11 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         ]
         answers = inquirer.prompt(confirm_question)
         if not answers or not answers.get("dns_configured"):
-            print("[bold red]DNS configuration not confirmed. Aborting deployment.[/bold red]")
-            raise OpsmithError("User did not confirm DNS configuration.")
+            raise OpsmithError(
+                "DNS configuration was not confirmed, so the deployment cannot continue.",
+                hint="Create the records shown above, then run the command again.",
+                details={"records": dns_records},
+            )
 
     def _deploy_frontend_service(
         self,
@@ -763,9 +806,10 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             environment,
             cdn_state,
         )
-        print(
-            "\n[bold green]Your website is available at:"
-            f" https://{domain_info.domain_name}[/bold green]"
+        self.events.log(
+            STEP_FRONTEND,
+            f"Your website is available at: https://{domain_info.domain_name}",
+            url=f"https://{domain_info.domain_name}",
         )
 
     def deploy(
@@ -795,15 +839,15 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
 
         env_state = MonolithicDeploymentState()
         if frontend_services:
-            print("\n[bold blue]Deploying frontend services...[/bold blue]")
+            self.events.step(STEP_FRONTEND, "Deploying frontend services...")
             domains_map = {d.service_name_slug: d for d in environment.domains}
 
             for service in frontend_services:
                 domain_info = domains_map.get(service.name_slug)
                 if not domain_info:
-                    print(
-                        f"[bold red]No domain configured for frontend service {service.name_slug}."
-                        " Skipping.[/bold red]"
+                    self.events.warning(
+                        STEP_FRONTEND,
+                        f"No domain configured for frontend service {service.name_slug}. Skipping.",
                     )
                     continue
                 self._deploy_frontend_service(
@@ -814,27 +858,30 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             original_services = deployment_config.services
             deployment_config.services = other_services
 
-            print(
-                "\n[bold blue]Setting up container registry for region"
-                f" '{environment.cloud_provider_detail.region}'... \n[/bold blue]"
+            self.events.step(
+                STEP_REGISTRY,
+                (
+                    "Setting up container registry for region"
+                    f" '{environment.cloud_provider_detail.region}'..."
+                ),
             )
             registry_url = self._setup_container_registry(deployment_config, environment)
             images = self._build_and_push_images(deployment_config, environment, registry_url)
 
-            print(f"\n[bold blue]Selecting instance type on {cloud_provider.name()}...[/bold blue]")
+            self.events.step(STEP_VM, f"Selecting instance type on {cloud_provider.name()}...")
             selected_machine_type = self._select_virtual_machine_type(
                 deployment_config, cloud_provider
             )
             instance_type = selected_machine_type.name
             instance_arch = selected_machine_type.architecture
-            print(
-                f"[bold green]Selected instance type: {instance_type} ({instance_arch.value})[/bold"
-                " green]"
+            self.events.log(
+                STEP_VM,
+                f"Selected instance type: {instance_type} ({instance_arch.value})",
+                instance_type=instance_type,
+                architecture=instance_arch.value,
             )
 
-            print(
-                "\n[bold blue]Creating new virtual machine for monolithic deployment...[/bold blue]"
-            )
+            self.events.step(STEP_VM, "Creating new virtual machine for monolithic deployment...")
             virtual_machine_state = self._create_virtual_machine(
                 deployment_config, environment, selected_machine_type, cloud_provider
             )
@@ -856,9 +903,10 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             self._generate_docker_compose(deployment_config, environment, images, env_state)
 
             for domain in environment.get_domains_for_services(other_services):
-                print(
-                    "\n[bold green]Your website is available at:"
-                    f" https://{domain.domain_name}[/bold green]"
+                self.events.log(
+                    STEP_COMPOSE,
+                    f"Your website is available at: https://{domain.domain_name}",
+                    url=f"https://{domain.domain_name}",
                 )
 
         # Save config snapshots for change detection
@@ -878,15 +926,18 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         # Release frontend services
         frontend_services = self._get_frontend_services(deployment_config)
         if frontend_services:
-            print("\n[bold blue]Releasing frontend services...[/bold blue]")
+            self.events.step(STEP_FRONTEND, "Releasing frontend services...")
             cdn_state_map = {cdn.service_name_slug: cdn for cdn in env_state.frontend_cdn}
 
             for service in frontend_services:
                 cdn_state = cdn_state_map.get(service.name_slug)
                 if not cdn_state:
-                    print(
-                        "[bold yellow]No existing CDN state found for frontend service"
-                        f" '{service.name_slug}'. Skipping release.[/bold yellow]"
+                    self.events.warning(
+                        STEP_FRONTEND,
+                        (
+                            "No existing CDN state found for frontend service"
+                            f" '{service.name_slug}'. Skipping release."
+                        ),
                     )
                     continue
 
@@ -903,9 +954,10 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                     environment,
                     cdn_state,
                 )
-                print(
-                    "\n[bold green]Your website is available at:"
-                    f" https://{cdn_state.domain_name}[/bold green]"
+                self.events.log(
+                    STEP_FRONTEND,
+                    f"Your website is available at: https://{cdn_state.domain_name}",
+                    url=f"https://{cdn_state.domain_name}",
                 )
 
         # Release other services
@@ -944,10 +996,10 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                 )
 
                 if is_successful:
-                    print("[bold green]Release deployed successfully.[/bold green]")
+                    self.events.log(STEP_COMPOSE, "Release deployed successfully.")
                 else:
-                    print(f"[red]Deployment validation failed:[/red] {reason}")
-                    print("\n[bold blue]Regenerating docker-compose configuration...[/bold blue]")
+                    self.events.warning(STEP_COMPOSE, f"Deployment validation failed: {reason}")
+                    self.events.step(STEP_COMPOSE, "Regenerating docker-compose configuration...")
                     self._generate_docker_compose(
                         deployment_config,
                         environment,
@@ -958,9 +1010,12 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                     )
             else:
                 # This can happen if only frontend was deployed
-                print(
-                    "[bold yellow]No virtual machine provisioned for this environment. Skipping"
-                    " release of other services.[/bold yellow]"
+                self.events.warning(
+                    STEP_COMPOSE,
+                    (
+                        "No virtual machine provisioned for this environment. Skipping release of"
+                        " other services."
+                    ),
                 )
 
         if state_updated:
@@ -972,14 +1027,17 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         environment: DeploymentEnvironment,
     ):
         """Destroys the environment's infrastructure."""
-        print("\n[bold blue]Destroying monolithic environment...[/bold blue]")
+        self.events.step(STEP_DESTROY, "Destroying monolithic environment...")
         cloud_provider = environment.cloud_provider_instance
 
         env_state_path = self._get_env_state_path(environment.name)
         if not env_state_path.exists():
-            print(
-                f"[bold yellow]No state file found for environment '{environment.name}'. Skipping"
-                " infrastructure destruction.[/bold yellow]"
+            self.events.warning(
+                STEP_DESTROY,
+                (
+                    f"No state file found for environment '{environment.name}'. Skipping"
+                    " infrastructure destruction."
+                ),
             )
             return
 
@@ -987,9 +1045,12 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
 
         # Destroy frontend CDNs
         for cdn_state in env_state.frontend_cdn:
-            print(
-                "\n[bold blue]Destroying content delivery network for service"
-                f" '{cdn_state.service_name_slug}'...[/bold blue]"
+            self.events.step(
+                STEP_DESTROY,
+                (
+                    "Destroying content delivery network for service"
+                    f" '{cdn_state.service_name_slug}'..."
+                ),
             )
             # Destroy part 2 first
             infra_path_p2 = (
@@ -1000,7 +1061,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                 / cdn_state.service_name_slug
             )
             if infra_path_p2.exists():
-                tf_p2 = TerraformProvisioner(working_dir=infra_path_p2)
+                tf_p2 = self.provisioners.terraform(infra_path_p2, step=STEP_DESTROY)
                 variables_p2 = {
                     "app_name": deployment_config.app_name_slug,
                     "domain_name": cdn_state.domain_name,
@@ -1025,7 +1086,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             )
 
             if infra_path_p1.exists():
-                tf_p1 = TerraformProvisioner(working_dir=infra_path_p1)
+                tf_p1 = self.provisioners.terraform(infra_path_p1, step=STEP_DESTROY)
                 variables_p1 = {
                     "app_name": deployment_config.app_name_slug,
                     "domain_name": cdn_state.domain_name,
@@ -1033,10 +1094,12 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                 env_vars = cloud_provider.provider_detail_dump
                 tf_p1.destroy(variables_p1, env_vars=env_vars)
             else:
-                print(
-                    "[bold yellow]No content delivery network infrastructure found for"
-                    f" service '{cdn_state.service_name_slug}'. Skipping destruction.[/bold"
-                    " yellow]"
+                self.events.warning(
+                    STEP_DESTROY,
+                    (
+                        "No content delivery network infrastructure found for service"
+                        f" '{cdn_state.service_name_slug}'. Skipping destruction."
+                    ),
                 )
 
         # Destroy virtual machine
@@ -1045,7 +1108,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                 self.deployments_path / "environments" / environment.name / "virtual_machine"
             )
             if infra_path.exists():
-                tf = TerraformProvisioner(working_dir=infra_path)
+                tf = self.provisioners.terraform(infra_path, step=STEP_DESTROY)
 
                 variables = {
                     "app_name": deployment_config.app_name_slug,
@@ -1057,9 +1120,12 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                 env_vars = cloud_provider.provider_detail.model_dump(mode="json")
                 tf.destroy(variables, env_vars=env_vars)
             else:
-                print(
-                    "[bold yellow]No virtual machine infrastructure found for environment"
-                    f" '{environment.name}'. Skipping VM destruction.[/bold yellow]"
+                self.events.warning(
+                    STEP_DESTROY,
+                    (
+                        "No virtual machine infrastructure found for environment"
+                        f" '{environment.name}'. Skipping VM destruction."
+                    ),
                 )
 
         # Clean up environment directory
@@ -1067,10 +1133,10 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         if env_dir_path.exists():
             try:
                 shutil.rmtree(env_dir_path)
-                print(f"[bold green]Environment directory '{env_dir_path}' deleted.[/bold green]")
+                self.events.log(STEP_DESTROY, f"Environment directory '{env_dir_path}' deleted.")
             except OSError as e:
-                print(
-                    f"[bold red]Error deleting environment directory {env_dir_path}: {e}[/bold red]"
+                self.events.warning(
+                    STEP_DESTROY, f"Error deleting environment directory {env_dir_path}: {e}"
                 )
 
         # Clean up the container registry if there are no more envs in that region
@@ -1084,10 +1150,12 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         ]
 
         if not remaining_environments_in_region and env_state.registry_url:
-            print(
-                "\n[bold blue]Last environment in region"
-                f" '{environment.cloud_provider_detail.region}'. Destroying container"
-                " registry...[/bold blue]"
+            self.events.step(
+                STEP_DESTROY,
+                (
+                    f"Last environment in region '{environment.cloud_provider_detail.region}'."
+                    " Destroying container registry..."
+                ),
             )
             app_name = deployment_config.app_name_slug
             registry_name = slugify(f"{app_name}-{environment.cloud_provider_detail.region}")
@@ -1101,7 +1169,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             )
 
             if registry_infra_path.exists():
-                tf = TerraformProvisioner(working_dir=registry_infra_path)
+                tf = self.provisioners.terraform(registry_infra_path, step=STEP_DESTROY)
                 variables = {
                     "app_name": app_name,
                     "registry_name": registry_name,
@@ -1109,27 +1177,28 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                 }
                 env_vars = cloud_provider.provider_detail_dump
                 tf.destroy(variables, env_vars=env_vars)
-                print("[bold green]Container registry destroyed successfully.[/bold green]")
+                self.events.log(STEP_DESTROY, "Container registry destroyed successfully.")
                 try:
                     shutil.rmtree(registry_infra_path.parent)
-                    print(
-                        f"[bold green]Global region directory '{registry_infra_path.parent}'"
-                        " deleted.[/bold green]"
+                    self.events.log(
+                        STEP_DESTROY,
+                        f"Global region directory '{registry_infra_path.parent}' deleted.",
                     )
                 except OSError as e:
-                    print(
-                        "[bold red]Error deleting global region directory"
-                        f" {registry_infra_path.parent}: {e}[/bold red]"
+                    self.events.warning(
+                        STEP_DESTROY,
+                        f"Error deleting global region directory {registry_infra_path.parent}: {e}",
                     )
             else:
-                print(
-                    "[bold yellow]Container registry infrastructure path not found. Skipping"
-                    " destruction.[/bold yellow]"
+                self.events.warning(
+                    STEP_DESTROY,
+                    "Container registry infrastructure path not found. Skipping destruction.",
                 )
 
         # Clean up the deployment config
         deployment_config.environments = remaining_environments
-        deployment_config.save(self.deployments_path)
+        config_path = deployment_config.save(self.deployments_path)
+        self.events.log(STEP_DESTROY, f"Deployment configuration saved to: {config_path}")
 
     def run(
         self,
@@ -1139,7 +1208,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         command: str,
     ):
         """Runs a command on a specific service."""
-        print(f"\n[bold blue]Running command on '{service_name_slug}': {command}[/bold blue]")
+        self.events.step(STEP_RUN, f"Running command on '{service_name_slug}': {command}")
         env_state_path = self._get_env_state_path(environment.name)
         env_state = MonolithicDeploymentState.load(env_state_path)
 
@@ -1154,7 +1223,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         run_command_path = (
             self.deployments_path / "environments" / environment.name / "docker_compose_run"
         )
-        ansible_runner = AnsibleProvisioner(working_dir=run_command_path)
+        ansible_runner = self.provisioners.ansible(run_command_path, step=STEP_RUN)
         ansible_runner.copy_template(
             "docker_compose_run", environment.cloud_provider_instance.name()
         )
@@ -1186,15 +1255,11 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         - Infrastructure dependency changes
         - Port/configuration changes
         """
-        print("\n[bold blue]Starting configuration update...[/bold blue]")
+        self.events.step(STEP_SETUP, "Starting configuration update...")
 
         # Load existing state
         env_state_path = self._get_env_state_path(environment.name)
         if not env_state_path.exists():
-            print(
-                "[bold red]No deployment found for this environment. Please run 'deploy'"
-                " first.[/bold red]"
-            )
             raise UnknownEnvironment(
                 f"No state file found at {env_state_path}. Run 'deploy' first.",
                 hint="Run 'opsmith deploy' for this environment first.",
@@ -1207,37 +1272,31 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         has_changes, changes = self._detect_configuration_changes(deployment_config, env_state)
 
         if not has_changes:
-            print("[bold green]No configuration changes detected. Nothing to update.[/bold green]")
+            self.events.log(STEP_SETUP, "No configuration changes detected. Nothing to update.")
             return
 
         # Display detected changes
-        print("\n[bold]Configuration changes detected:[/bold]")
-        if changes["services_added"]:
-            print(f"  [green]Services added:[/green] {', '.join(changes['services_added'])}")
-        if changes["services_removed"]:
-            print(f"  [red]Services removed:[/red] {', '.join(changes['services_removed'])}")
-        if changes["services_modified"]:
-            print(
-                f"  [yellow]Services modified:[/yellow] {', '.join(changes['services_modified'])}"
-            )
-        if changes["infra_added"]:
-            print(f"  [green]Infrastructure added:[/green] {', '.join(changes['infra_added'])}")
-        if changes["infra_removed"]:
-            print(f"  [red]Infrastructure removed:[/red] {', '.join(changes['infra_removed'])}")
-        if changes["infra_modified"]:
-            print(
-                "  [yellow]Infrastructure modified:[/yellow]"
-                f" {', '.join(changes['infra_modified'])}"
-            )
+        self.events.step(STEP_SETUP, "Configuration changes detected:", changes=changes)
+        change_labels = {
+            "services_added": "Services added",
+            "services_removed": "Services removed",
+            "services_modified": "Services modified",
+            "infra_added": "Infrastructure added",
+            "infra_removed": "Infrastructure removed",
+            "infra_modified": "Infrastructure modified",
+        }
+        for change_key, label in change_labels.items():
+            if changes[change_key]:
+                self.events.log(STEP_SETUP, f"  {label}: {', '.join(changes[change_key])}")
 
         # Warn about infrastructure changes
         infra_changes = (
             changes["infra_added"] or changes["infra_removed"] or changes["infra_modified"]
         )
         if infra_changes:
-            print(
-                "\n[bold yellow]WARNING: Infrastructure changes detected. Existing data in affected"
-                " services may be lost.[/bold yellow]"
+            self.events.warning(
+                STEP_SETUP,
+                "Infrastructure changes detected. Existing data in affected services may be lost.",
             )
             confirm_questions = [
                 inquirer.Confirm(
@@ -1248,7 +1307,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             ]
             confirm_answers = inquirer.prompt(confirm_questions)
             if not confirm_answers or not confirm_answers.get("continue"):
-                print("[bold yellow]Update cancelled by user.[/bold yellow]")
+                self.events.warning(STEP_SETUP, "Update cancelled by user.")
                 return
 
         cloud_provider = environment.cloud_provider_instance
@@ -1256,7 +1315,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         # Handle frontend services
         frontend_services = self._get_frontend_services(deployment_config)
         if frontend_services:
-            print("\n[bold blue]Updating frontend services...[/bold blue]")
+            self.events.step(STEP_FRONTEND, "Updating frontend services...")
             cdn_state_map = {cdn.service_name_slug: cdn for cdn in env_state.frontend_cdn}
             domains_map = {d.service_name_slug: d for d in environment.domains}
 
@@ -1266,10 +1325,13 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                     # New frontend service - create CDN
                     domain_info = domains_map.get(service.name_slug)
                     if not domain_info:
-                        # This should not happen if main.py did its job
-                        print(
-                            f"[bold yellow]No domain configured for '{service.name_slug}'. "
-                            "Skipping CDN creation.[/bold yellow]"
+                        # This should not happen if the deploy command did its job
+                        self.events.warning(
+                            STEP_FRONTEND,
+                            (
+                                f"No domain configured for '{service.name_slug}'. Skipping CDN"
+                                " creation."
+                            ),
                         )
                         continue
                     self._deploy_frontend_service(
@@ -1291,9 +1353,9 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                     self._build_and_upload_frontend_assets(
                         service, cloud_provider, environment, cdn_state
                     )
-                    print(
-                        f"[bold green]Frontend service '{service.name_slug}' updated"
-                        " successfully.[/bold green]"
+                    self.events.log(
+                        STEP_FRONTEND,
+                        f"Frontend service '{service.name_slug}' updated successfully.",
                     )
 
         # Handle backend services
@@ -1303,13 +1365,16 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
 
         if other_services:
             if not env_state.virtual_machine:
-                print(
-                    "[bold yellow]No virtual machine provisioned for this environment. Cannot"
-                    " update backend services.[/bold yellow]"
+                self.events.warning(
+                    STEP_COMPOSE,
+                    (
+                        "No virtual machine provisioned for this environment. Cannot update backend"
+                        " services."
+                    ),
                 )
                 return
 
-            print("\n[bold blue]Updating backend services...[/bold blue]")
+            self.events.step(STEP_COMPOSE, "Updating backend services...")
 
             # Rebuild and push images
             images = self._build_and_push_images(
@@ -1327,7 +1392,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             existing_env_content = fetched_files[0]
 
             # Regenerate docker-compose with existing env as starting point
-            print("\n[bold blue]Regenerating docker-compose configuration...[/bold blue]")
+            self.events.step(STEP_COMPOSE, "Regenerating docker-compose configuration...")
             self._generate_docker_compose(
                 deployment_config,
                 environment,
@@ -1336,7 +1401,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                 existing_env_content=existing_env_content,
             )
 
-            print("[bold green]Backend services updated successfully.[/bold green]")
+            self.events.log(STEP_COMPOSE, "Backend services updated successfully.")
 
         # Update state with new config snapshots
         self._save_deployment_state(env_state, deployment_config, env_state_path)

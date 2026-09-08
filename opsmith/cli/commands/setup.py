@@ -7,7 +7,6 @@ from pydantic import ValidationError
 from rich import print
 
 from opsmith.cli.state import CliState
-from opsmith.git_repo import GitRepo
 from opsmith.service_detector import ServiceDetector
 from opsmith.types import DeploymentConfig, InfrastructureDependency, ServiceInfo
 from opsmith.utils import slugify
@@ -57,8 +56,7 @@ def setup(ctx: typer.Context):
     Identifies services, their languages, types, and frameworks.
     """
     state: CliState = ctx.obj
-    detector = ServiceDetector(src_dir=state.src_dir, agent=state.agent, verbose=state.verbose)
-    git_repo = GitRepo(state.src_dir)
+    detector = ServiceDetector(ctx=state.context)
     deployment_config = DeploymentConfig.load(state.deployments_path)
     scan_services = False
 
@@ -98,7 +96,7 @@ def setup(ctx: typer.Context):
             app_name_slug=slugify(app_name),
         )
         scan_services = True
-        git_repo.ensure_gitignore()
+        state.context.git_repo.ensure_gitignore()
 
     if scan_services:
         print("Scanning your codebase now to detect services, frameworks, and languages...")
@@ -156,4 +154,5 @@ def setup(ctx: typer.Context):
             ]
 
     # Create/Update and Save Configuration
-    deployment_config.save(state.deployments_path)
+    config_path = deployment_config.save(state.deployments_path)
+    print(f"\n[bold blue]Deployment configuration saved to: {config_path}[/bold blue]")

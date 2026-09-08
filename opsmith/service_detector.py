@@ -9,13 +9,12 @@ from typing import List, Optional
 import inquirer
 import yaml
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage
-from rich import print
-from rich.markup import escape
 
 from opsmith.agent import AgentDeps
+from opsmith.core.context import OpsmithContext
 from opsmith.core.errors import OpsmithError
+from opsmith.core.events import STEP_BUILD, STEP_DETECT
 from opsmith.prompts import (
     DOCKERFILE_GENERATION_PROMPT_TEMPLATE,
     DOCKERFILE_VALIDATION_PROMPT_TEMPLATE,
@@ -24,7 +23,6 @@ from opsmith.prompts import (
 from opsmith.repo_map import RepoMap
 from opsmith.settings import settings
 from opsmith.types import ServiceInfo, ServiceList, ServiceTypeEnum
-from opsmith.utils import WaitingSpinner
 
 
 class DockerfileContent(BaseModel):
@@ -60,22 +58,22 @@ class DockerfileValidation(BaseModel):
 
 
 class ServiceDetector:
-    def __init__(
-        self,
-        src_dir: str,
-        agent: Agent,
-        verbose: bool = False,
-    ):
-        self.deployments_path = Path(src_dir).joinpath(settings.deployments_dir)
-        self.agent = agent
-        self.repo_map = RepoMap(
-            src_dir=src_dir,
-            verbose=verbose,
-        )
+    """Works out what a repository deploys, and writes a Dockerfile per service."""
+
+    def __init__(self, ctx: OpsmithContext):
+        """
+        :param ctx: The run's context, supplying the source directory, the model, the event sink
+            and whether the run was asked for verbose output.
+        """
+        self.ctx = ctx
+        self.events = ctx.events
+        self.deployments_path = ctx.deployments_path
+        self.agent = ctx.agent
+        self.repo_map = RepoMap(ctx=ctx)
         self.agent_deps = AgentDeps(
-            src_dir=Path(src_dir), tracked_files=self.repo_map.tracked_files
+            src_dir=Path(ctx.src_dir), tracked_files=self.repo_map.tracked_files
         )
-        self.verbose = verbose
+        self.verbose = ctx.verbose
 
     def detect_services(self, existing_config: Optional[ServiceList] = None) -> ServiceList:
         """
@@ -89,7 +87,7 @@ class ServiceDetector:
         """
         repo_map_str = self.repo_map.get_repo_map()
         if self.verbose:
-            print("Repo map generated:")
+            self.events.log(STEP_DETECT, "Repo map generated.")
 
         if existing_config:
             existing_config_yaml = yaml.dump(existing_config.model_dump(mode="json"), indent=2)
@@ -100,8 +98,10 @@ class ServiceDetector:
             repo_map_str=repo_map_str, existing_config_yaml=existing_config_yaml
         )
 
-        print("Calling AI agent to analyse the repo and determine the services...")
-        with WaitingSpinner(text="Waiting for the LLM"):
+        self.events.log(
+            STEP_DETECT, "Calling AI agent to analyse the repo and determine the services..."
+        )
+        with self.events.waiting(STEP_DETECT, "Waiting for the LLM"):
             run_result = self.agent.run_sync(prompt, output_type=ServiceList, deps=self.agent_deps)
 
         service_list = run_result.output
@@ -123,16 +123,16 @@ class ServiceDetector:
             ServiceTypeEnum.BACKEND_WORKER,
         ]
         if service.service_type not in buildable_service_types:
-            print(
-                f"\n[bold yellow]Dockerfile not needed for service {service.service_type},"
-                " skipping.[/bold yellow]"
+            self.events.warning(
+                STEP_BUILD,
+                f"Dockerfile not needed for service {service.service_type}, skipping.",
             )
             return
 
         service_dir_path = self.deployments_path / "docker" / service.name_slug
         service_dir_path.mkdir(parents=True, exist_ok=True)
         dockerfile_path_abs = service_dir_path / "Dockerfile"
-        print(f"\n[bold]Generating Dockerfile for service: {service.name_slug}...[/bold]")
+        self.events.step(STEP_BUILD, f"Generating Dockerfile for service: {service.name_slug}...")
 
         template_name = f"{service.language.lower()}_{service.service_type.value.lower()}"
         template_path = Path(__file__).parent / "templates" / "dockerfiles" / template_name
@@ -140,7 +140,7 @@ class ServiceDetector:
         if template_path.exists():
             with open(template_path, "r", encoding="utf-8") as f:
                 dockerfile_template = f.read()
-            print(f"[green]Using Dockerfile template: {template_name}[/green]")
+            self.events.log(STEP_BUILD, f"Using Dockerfile template: {template_name}")
 
         dockerfile_content = self._generate_and_validate_dockerfile(
             service, dockerfile_path_abs, dockerfile_template
@@ -148,7 +148,7 @@ class ServiceDetector:
 
         with open(dockerfile_path_abs, "w", encoding="utf-8") as f:
             f.write(dockerfile_content)
-        print(f"[green]Dockerfile saved to: {dockerfile_path_abs}[/green]")
+        self.events.log(STEP_BUILD, f"Dockerfile saved to: {dockerfile_path_abs}")
 
     def _generate_and_validate_dockerfile(
         self,
@@ -170,7 +170,9 @@ class ServiceDetector:
 
         while attempt < settings.max_dockerfile_gen_attempts:
             attempt += 1
-            print(f"\n[bold]Attempt {attempt}/{settings.max_dockerfile_gen_attempts}...[/bold]")
+            self.events.step(
+                STEP_BUILD, f"Attempt {attempt}/{settings.max_dockerfile_gen_attempts}..."
+            )
 
             repo_map_str = self.repo_map.get_repo_map()
             template_section = ""
@@ -188,7 +190,7 @@ class ServiceDetector:
                 repo_map_str=repo_map_str,
                 existing_dockerfile_content=existing_dockerfile_content,
             )
-            with WaitingSpinner(text="Waiting for the LLM to generate the Dockerfile"):
+            with self.events.waiting(STEP_BUILD, "Waiting for the LLM to generate the Dockerfile"):
                 response = self.agent.run_sync(
                     prompt,
                     deps=self.agent_deps,
@@ -200,9 +202,8 @@ class ServiceDetector:
                 reason = response.output.reason
 
             if give_up:
-                print(
-                    "[bold yellow]LLM indicated it cannot fix the Dockerfile further:"
-                    f" \n{reason}.[/bold yellow]"
+                self.events.warning(
+                    STEP_BUILD, f"LLM indicated it cannot fix the Dockerfile further: {reason}."
                 )
                 break
 
@@ -211,11 +212,11 @@ class ServiceDetector:
             )
 
             if is_successful:
-                print(f"[bold green]Dockerfile validation successful: \n {reason}.[/bold green]")
+                self.events.log(STEP_BUILD, f"Dockerfile validation successful: {reason}.")
                 completed = True
                 break
 
-            print(f"Docker compose validation 'failed' with reason: \n {reason}.")
+            self.events.warning(STEP_BUILD, f"Dockerfile validation failed with reason: {reason}.")
 
             messages = response.new_messages() + validation_messages
 
@@ -233,19 +234,25 @@ class ServiceDetector:
             dockerfile_content = editor_answers["dockerfile"]
 
             completed, reason, _ = self._validate_dockerfile(dockerfile_content)
-            print(
-                f"Dockerfile validation {'succeeded' if completed else 'failed'} "
-                f"with reason: \n {reason}."
+            self.events.log(
+                STEP_BUILD,
+                (
+                    f"Dockerfile validation {'succeeded' if completed else 'failed'} with reason:"
+                    f" {reason}."
+                ),
             )
 
         return dockerfile_content
 
-    @staticmethod
     def _run_command_with_streaming_output(
-        command: List[str], timeout: int
+        self, command: List[str], timeout: int
     ) -> tuple[int, str, bool]:
         """
         Runs a command and streams its output, returning the exit code, full output, and timeout status.
+
+        :param command: The argument vector to run.
+        :param timeout: Seconds to wait before terminating the process.
+        :return: The exit code, everything the command wrote, and whether it timed out.
         """
         process = subprocess.Popen(
             command,
@@ -261,7 +268,7 @@ class ServiceDetector:
             for line in iter(process.stdout.readline, ""):
                 stripped_line = line.strip()
                 output_lines.append(stripped_line)
-                print(f"[grey50]{escape(stripped_line)}[/grey50]")
+                self.events.output(STEP_BUILD, stripped_line)
 
         reader_thread = threading.Thread(target=stream_reader)
         reader_thread.daemon = True
@@ -300,7 +307,7 @@ class ServiceDetector:
                     f.write(dockerfile_content)
 
                 # Execute docker build command
-                print("[bold blue]Attempting to build the Dockerfile...[/bold blue]")
+                self.events.step(STEP_BUILD, "Attempting to build the Dockerfile...")
                 build_command = [
                     "docker",
                     "build",
@@ -319,14 +326,14 @@ class ServiceDetector:
                 is_successful = False
             else:
                 # Build successful, now try to run the image
-                print("[bold blue]Build successful. Attempting to run the container...[/bold blue]")
+                self.events.step(STEP_BUILD, "Build successful. Attempting to run the container...")
                 run_command = ["docker", "run", "--rm", image_tag]
                 run_rc, run_output_str, timed_out = self._run_command_with_streaming_output(
                     run_command, timeout=60
                 )
 
                 if timed_out:
-                    print("[bold yellow]Container running for 60s, assuming success.[/bold yellow]")
+                    self.events.log(STEP_BUILD, "Container running for 60s, assuming success.")
 
                 # Run failed.
                 if run_rc != 0:
@@ -340,9 +347,12 @@ class ServiceDetector:
                 cleanup_image_process.returncode != 0
                 and "no such image" not in cleanup_image_process.stderr.lower()
             ):
-                print(
-                    f"Warning: Failed to remove Docker image {image_tag}:"
-                    f" {cleanup_image_process.stderr.strip()}"
+                self.events.warning(
+                    STEP_BUILD,
+                    (
+                        f"Failed to remove Docker image {image_tag}:"
+                        f" {cleanup_image_process.stderr.strip()}"
+                    ),
                 )
 
         if not is_successful:
@@ -350,7 +360,9 @@ class ServiceDetector:
                 build_output=build_output_str,
                 run_output=run_output_str,
             )
-            with WaitingSpinner(text="Waiting for the LLM to validate the Docker build output"):
+            with self.events.waiting(
+                STEP_BUILD, "Waiting for the LLM to validate the Docker build output"
+            ):
                 validation_response = self.agent.run_sync(
                     validation_prompt,
                     output_type=DockerfileValidation,

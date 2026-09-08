@@ -1,10 +1,14 @@
 import abc
 from enum import Enum
 from importlib.metadata import entry_points
-from typing import Dict, List, Optional, Tuple, Type
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Type
 
 from pydantic import BaseModel, Field, TypeAdapter
-from rich import print
+
+from opsmith.core.events import STEP_REGISTRY, BufferingSink
+
+if TYPE_CHECKING:
+    from opsmith.core.context import OpsmithContext
 
 
 class CpuArchitectureEnum(str, Enum):
@@ -66,10 +70,15 @@ class CloudProviderRegistry:
     _instance: Optional["CloudProviderRegistry"] = None
     _providers: Dict[str, Type["BaseCloudProvider"]]
 
+    #: Plugins load at import time, before the CLI has a renderer, so what happens during the
+    #: load is buffered here and drained once there is somewhere to report it.
+    pending_events: BufferingSink
+
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._providers = {}
+            cls._instance.pending_events = BufferingSink()
             cls._instance._load_builtin_providers()
             cls._instance._load_plugin_providers()
         return cls._instance
@@ -111,11 +120,14 @@ class CloudProviderRegistry:
             try:
                 provider_class = entry_point.load()
                 self.register(provider_class)
-                print(f"Loaded cloud provider: {provider_class.name()}")
+                self.pending_events.log(
+                    STEP_REGISTRY, f"Loaded cloud provider: {provider_class.name()}"
+                )
             except Exception as e:
-                print(
-                    "[yellow]Warning: Failed to load cloud provider from entry point"
-                    f" '{entry_point.name}': {e}[/yellow]"
+                self.pending_events.warning(
+                    STEP_REGISTRY,
+                    f"Failed to load cloud provider from entry point '{entry_point.name}': {e}",
+                    entry_point=entry_point.name,
                 )
 
 
@@ -142,9 +154,12 @@ class BaseCloudProvider(abc.ABC):
 
     @classmethod
     @abc.abstractmethod
-    def get_account_details(cls) -> "BaseCloudProviderDetail":
+    def get_account_details(cls, ctx: "OpsmithContext") -> "BaseCloudProviderDetail":
         """
         Retrieves structured account details for the cloud provider.
+
+        :param ctx: The run's context, for reporting progress while the provider is queried.
+            Part 0d also asks this method's questions through ``ctx.interact``.
         """
         raise NotImplementedError
 

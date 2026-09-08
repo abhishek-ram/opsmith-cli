@@ -4,15 +4,14 @@ from importlib import resources
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 
-import typer
 from grep_ast import TreeContext, filename_to_lang
 from grep_ast.tsl import get_language, get_parser
 from tqdm import tqdm
 from tree_sitter import Query, QueryCursor
 
 from opsmith.constants import ROOT_IMPORTANT_FILES
-from opsmith.git_repo import GitRepo
-from opsmith.utils import WaitingSpinner
+from opsmith.core.context import OpsmithContext
+from opsmith.core.events import STEP_DETECT
 
 
 class Tag(NamedTuple):
@@ -63,13 +62,12 @@ class RepoMap:
 
     def __init__(
         self,
-        src_dir: str,
+        ctx: OpsmithContext,
         map_tokens: int = 5120,
         max_tags_depth: int = 2,
         repo_content_prefix: Optional[
             str
         ] = "This repo map contains a list of files and important symbols.\n\n",
-        verbose: bool = False,
     ):
         """
         Initializes an instance of the class, which sets up configuration and parameters
@@ -77,18 +75,20 @@ class RepoMap:
         attributes for managing warnings and tag depths, and optionally logs verbose
         messages if enabled.
 
-        :param src_dir: The directory path of the repository to be processed.
+        :param ctx: The run's context, supplying the source directory, the repository, the
+            event sink and whether the run was asked for verbose output.
         :param map_tokens: The maximum number of tokens allowed in the mapping
             process.
         :param max_tags_depth: The maximum depth level for tagging content within
             the repository.
         :param repo_content_prefix: An optional prefix string that specifies initial
             details or descriptions before mapping repository content.
-        :param verbose: A flag indicating if detailed logging should be enabled.
         """
-        self.src_dir = Path(src_dir).resolve()
-        self.git_repo = GitRepo(self.src_dir)
-        self.verbose = verbose
+        self.ctx = ctx
+        self.events = ctx.events
+        self.src_dir = Path(ctx.src_dir).resolve()
+        self.git_repo = ctx.git_repo
+        self.verbose = ctx.verbose
         self.tracked_files: List[Path] = self.git_repo.get_git_tracked_files(
             [str(self.src_dir), ":!**/*test*"]
         )
@@ -102,7 +102,7 @@ class RepoMap:
 
         self._warned_missing_scm = set()
         if self.verbose:
-            typer.echo(f"RepoMap initialized for {self.src_dir}")
+            self.events.log(STEP_DETECT, f"RepoMap initialized for {self.src_dir}")
 
     @staticmethod
     def _simple_token_count(text: str) -> int:
@@ -153,7 +153,7 @@ class RepoMap:
         all_tracked_files_paths = self.tracked_files
         if not all_tracked_files_paths:
             if self.verbose:
-                typer.echo("RepoMap: No git-tracked files found.", err=True)
+                self.events.log(STEP_DETECT, "RepoMap: No git-tracked files found.")
             return None  # No files to map
 
         all_tracked_files_abs_str = [str(p.resolve()) for p in all_tracked_files_paths]
@@ -161,28 +161,28 @@ class RepoMap:
         current_max_map_tokens = self.max_map_tokens
 
         try:
-            with WaitingSpinner(text=REPO_MAP_MESSAGE):
+            with self.events.waiting(STEP_DETECT, REPO_MAP_MESSAGE):
                 # Progress within get_tags_map will use spinner.step or tqdm
                 files_listing = self.get_tags_map(
                     all_filenames_abs=all_tracked_files_abs_str,
                     max_tokens=current_max_map_tokens,
                 )
         except RecursionError:
-            typer.echo(
+            self.events.warning(
+                STEP_DETECT,
                 (
-                    "Error: Disabling repo map, recursion depth exceeded. "
-                    "Git repo might be too large or complex."
+                    "Disabling repo map, recursion depth exceeded. Git repo might be too large or"
+                    " complex."
                 ),
-                err=True,
             )
             self.max_map_tokens = 0  # Disable for future calls
             return None
         except Exception as e:
-            typer.echo(f"Error generating repo map: {e}", err=True)
+            self.events.warning(STEP_DETECT, f"Error generating repo map: {e}")
             if self.verbose:
                 import traceback
 
-                traceback.print_exc()
+                self.events.warning(STEP_DETECT, traceback.format_exc())
             return None
 
         if not files_listing:
@@ -190,9 +190,9 @@ class RepoMap:
 
         if self.verbose:
             num_tokens = self._token_count(files_listing)
-            typer.echo(
+            self.events.log(
+                STEP_DETECT,
                 f"RepoMap: Final map size {num_tokens / 1024:.1f} k-tokens (estimated)",
-                err=True,
             )
 
         repo_content = self.repo_content_prefix + files_listing
@@ -243,12 +243,12 @@ class RepoMap:
         except Exception as err:
             # This can happen if tree-sitter binaries/parsers for the lang are not found
             if self.verbose:
-                typer.echo(
+                self.events.log(
+                    STEP_DETECT,
                     (
                         f"RepoMap: Skipping file {filename_abs_str} for tags (parser/lang init"
                         f" error): {err}"
                     ),
-                    err=True,
                 )
             return tags
 
@@ -263,9 +263,9 @@ class RepoMap:
             code = Path(filename_abs_str).read_text(encoding="utf-8", errors="ignore")
         except Exception as e:
             if self.verbose:
-                typer.echo(
+                self.events.log(
+                    STEP_DETECT,
                     f"RepoMap: Could not read file {filename_abs_str} for tagging: {e}",
-                    err=True,
                 )
             return tags
 
@@ -332,15 +332,16 @@ class RepoMap:
             try:
                 if not Path(filename_abs).is_file():
                     if filename_abs not in self.warned_files:
-                        typer.echo(
-                            f"RepoMap: File not found or not a file: {filename_abs}",
-                            err=True,
+                        self.events.warning(
+                            STEP_DETECT, f"RepoMap: File not found or not a file: {filename_abs}"
                         )
                         self.warned_files.add(filename_abs)
                     continue
             except OSError as e:  # Permissions, etc.
                 if filename_abs not in self.warned_files:
-                    typer.echo(f"RepoMap: OSError for file {filename_abs}: {e}", err=True)
+                    self.events.warning(
+                        STEP_DETECT, f"RepoMap: OSError for file {filename_abs}: {e}"
+                    )
                     self.warned_files.add(filename_abs)
                 continue
 

@@ -1,5 +1,5 @@
 import shutil
-from typing import Literal, Type
+from typing import TYPE_CHECKING, Literal, Type
 
 import boto3
 import botocore.session
@@ -15,7 +15,10 @@ from opsmith.cloud_providers.base import (
     MachineTypeList,
 )
 from opsmith.core.errors import CloudCredentialsError
-from opsmith.utils import WaitingSpinner
+from opsmith.core.events import STEP_VM, EventSink
+
+if TYPE_CHECKING:
+    from opsmith.core.context import OpsmithContext
 
 
 class AWSCloudDetail(BaseCloudProviderDetail):
@@ -43,11 +46,14 @@ class AWSProvider(BaseCloudProvider):
         return AWSCloudDetail
 
     @staticmethod
-    def get_regions() -> list[tuple[str, str]]:
+    def get_regions(events: EventSink) -> list[tuple[str, str]]:
         """
         Retrieves a list of available AWS regions with their display names.
+
+        :param events: Sink to report the wait on the AWS API to.
+        :return: (display name, region code) pairs, sorted by code.
         """
-        with WaitingSpinner(text="Fetching available regions from AWS Cloud Provider..."):
+        with events.waiting(STEP_VM, "Fetching available regions from AWS Cloud Provider..."):
             # Get available region codes from EC2
             ec2_client = boto3.client("ec2", region_name="us-east-1")
             response = ec2_client.describe_regions()
@@ -130,9 +136,12 @@ class AWSProvider(BaseCloudProvider):
         return MachineTypeList(machines=sorted_machines)
 
     @classmethod
-    def get_account_details(cls) -> AWSCloudDetail:
+    def get_account_details(cls, ctx: "OpsmithContext") -> AWSCloudDetail:
         """
         Retrieves structured AWS account details.
+
+        :param ctx: The run's context, for reporting the wait on the AWS API.
+        :return: The account, region and session-manager plugin path to deploy with.
         """
         try:
             ssm_plugin_path = shutil.which("session-manager-plugin")
@@ -157,7 +166,7 @@ class AWSProvider(BaseCloudProvider):
                     help_url="https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-quickstart.html",
                 )
 
-            regions = AWSProvider.get_regions()
+            regions = AWSProvider.get_regions(ctx.events)
             questions = [
                 inquirer.List(
                     "region",

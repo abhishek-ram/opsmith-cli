@@ -4,7 +4,6 @@ from typing import List, Optional, Type
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
-from rich import print
 
 from opsmith.cloud_providers import CLOUD_PROVIDER_REGISTRY
 from opsmith.cloud_providers.base import (
@@ -249,13 +248,20 @@ class DeploymentConfig(ServiceList):
         else:
             return None
 
-    def save(self, deployments_path: Path):
-        """Saves the deployment configuration to a YAML file."""
+    def save(self, deployments_path: Path) -> Path:
+        """
+        Saves the deployment configuration to a YAML file.
+
+        Saving is silent; the caller knows why it saved and reports it.
+
+        :param deployments_path: The ``.opsmith`` directory to write into.
+        :return: The path written.
+        """
         config_file_path = deployments_path / settings.config_filename
         deployments_path.mkdir(parents=True, exist_ok=True)
         with open(config_file_path, "w") as f:
             yaml.dump(self.model_dump(mode="json"), f, indent=2)
-        print(f"\n[bold blue]Deployment configuration saved to: {config_file_path}[/bold blue]")
+        return config_file_path
 
 
 class VirtualMachineState(BaseModel):

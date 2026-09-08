@@ -1,8 +1,27 @@
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from opsmith.core.context import OpsmithContext
+from opsmith.core.events import NullSink
 from opsmith.service_detector import ServiceDetector
 from opsmith.types import ServiceInfo, ServiceList, ServiceTypeEnum
+
+
+def build_context(agent: MagicMock) -> OpsmithContext:
+    """
+    Builds a context around a mock model, for a detector that never reaches the filesystem.
+
+    :param agent: The mock the detector will call instead of a real model.
+    :return: A context with a discarding event sink.
+    """
+    src_dir = Path("/fake/dir")
+    return OpsmithContext(
+        src_dir=src_dir,
+        deployments_path=src_dir / ".opsmith",
+        events=NullSink(),
+        agent=agent,
+    )
 
 
 class TestServiceDetector(unittest.TestCase):
@@ -33,7 +52,7 @@ class TestServiceDetector(unittest.TestCase):
         mock_run_result.output = service_list
         mock_agent.run_sync.return_value = mock_run_result
 
-        detector = ServiceDetector(src_dir="/fake/dir", agent=mock_agent)
+        detector = ServiceDetector(ctx=build_context(mock_agent))
 
         # Act
         result = detector.detect_services()
@@ -78,7 +97,7 @@ class TestServiceDetector(unittest.TestCase):
         mock_run_result.output = service_list
         mock_agent.run_sync.return_value = mock_run_result
 
-        detector = ServiceDetector(src_dir="/fake/dir", agent=mock_agent)
+        detector = ServiceDetector(ctx=build_context(mock_agent))
 
         # Act
         result = detector.detect_services(existing_config=existing_config)
@@ -121,7 +140,7 @@ class TestServiceDetector(unittest.TestCase):
         mock_run_result.output = service_list
         mock_agent.run_sync.return_value = mock_run_result
 
-        detector = ServiceDetector(src_dir="/fake/dir", agent=mock_agent)
+        detector = ServiceDetector(ctx=build_context(mock_agent))
 
         # Act
         result = detector.detect_services()

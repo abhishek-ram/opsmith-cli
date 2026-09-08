@@ -130,7 +130,7 @@ def deploy(ctx: typer.Context):
         # Initialize the provider
         print(f"Initializing {selected_provider_value} provider...\n")
         provider_class = CLOUD_PROVIDER_REGISTRY.get_provider_class(selected_provider_value)
-        cloud_details = provider_class.get_account_details().model_dump(mode="json")
+        cloud_details = provider_class.get_account_details(state.context).model_dump(mode="json")
 
         new_env_questions = [
             inquirer.Text(
@@ -171,8 +171,7 @@ def deploy(ctx: typer.Context):
         deployment_config.environments.append(new_env)
 
         deployment_strategy = DEPLOYMENT_STRATEGY_REGISTRY.get_strategy_class(selected_strategy)(
-            state.agent,
-            state.src_dir,
+            state.context
         )
         deployment_strategy.deploy(deployment_config, new_env)
 
@@ -202,8 +201,7 @@ def deploy(ctx: typer.Context):
     selected_action = action_answers["action"]
 
     deployment_strategy = DEPLOYMENT_STRATEGY_REGISTRY.get_strategy_class(selected_env.strategy)(
-        state.agent,
-        state.src_dir,
+        state.context
     )
 
     if selected_action == "release":

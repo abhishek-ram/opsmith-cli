@@ -5,10 +5,6 @@ import string
 import subprocess
 from typing import List
 
-from rich.console import Console
-from rich.status import Status
-from rich.text import Text
-
 
 def get_missing_external_dependencies(dependencies: List[str]) -> List[str]:
     """
@@ -60,55 +56,3 @@ def generate_secret_string(length: int = 32) -> str:
     """
     alphabet = string.ascii_letters + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(length))
-
-
-def build_logo() -> Text:
-    """
-    Builds and returns an ASCII art logo styled with specific colors and text formats.
-    The function creates a stylized representation of a logo using the ``Text`` object.
-    Each line of the logo is appended to the text object with a distinct style, alternating
-    between bold cyan and bold blue.
-
-    :return: Styled ASCII art logo representation.
-    :rtype: Text
-    """
-    ascii_art_logo = Text()
-    ascii_art_logo.append(
-        "\n ██████  ██████  ███████ ███    ███ ██ ████████ ██   ██\n", style="bold cyan"
-    )
-    ascii_art_logo.append(
-        "██    ██ ██   ██ ██      ████  ████ ██    ██    ██   ██\n", style="bold blue"
-    )
-    ascii_art_logo.append(
-        "██    ██ ██████  ███████ ██ ████ ██ ██    ██    ███████\n", style="bold cyan"
-    )
-    ascii_art_logo.append(
-        "██    ██ ██           ██ ██  ██  ██ ██    ██    ██   ██\n", style="bold blue"
-    )
-    ascii_art_logo.append(
-        " ██████  ██      ███████ ██      ██ ██    ██    ██   ██\n\n", style="bold cyan"
-    )
-    return ascii_art_logo
-
-
-class WaitingSpinner:
-    """A wrapper for rich.console.Status that can be used as a context manager."""
-
-    def __init__(self, text: str = "Waiting..."):
-        self.console = Console()
-        self.status: Status = self.console.status(text)
-
-    def start(self):
-        """Start the spinner."""
-        self.status.start()
-
-    def stop(self):
-        """Stop the spinner."""
-        self.status.stop()
-
-    def __enter__(self):
-        self.start()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.stop()

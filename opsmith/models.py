@@ -11,7 +11,8 @@ from pydantic_ai.models.openai import (
     OpenAIResponsesModelSettings,
 )
 from pydantic_ai.settings import ModelSettings
-from rich import print
+
+from opsmith.core.events import STEP_REGISTRY, BufferingSink
 
 
 class BaseAiModel(abc.ABC):
@@ -67,10 +68,15 @@ class ModelRegistry:
     _instance: Optional["ModelRegistry"] = None
     _models: Dict[str, Type["BaseAiModel"]]
 
+    #: Plugins load at import time, before the CLI has a renderer, so what happens during the
+    #: load is buffered here and drained once there is somewhere to report it.
+    pending_events: BufferingSink
+
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._models = {}
+            cls._instance.pending_events = BufferingSink()
             cls._instance._load_builtin_models()
             cls._instance._load_plugin_models()
         return cls._instance
@@ -119,11 +125,12 @@ class ModelRegistry:
             try:
                 model_class = entry_point.load()
                 self.register(model_class)
-                print(f"Loaded AI model: {model_class.name()}")
+                self.pending_events.log(STEP_REGISTRY, f"Loaded AI model: {model_class.name()}")
             except Exception as e:
-                print(
-                    "[yellow]Warning: Failed to load AI model from entry point"
-                    f" '{entry_point.name}': {e}[/yellow]"
+                self.pending_events.warning(
+                    STEP_REGISTRY,
+                    f"Failed to load AI model from entry point '{entry_point.name}': {e}",
+                    entry_point=entry_point.name,
                 )
 
 

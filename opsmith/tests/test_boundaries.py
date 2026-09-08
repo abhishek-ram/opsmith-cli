@@ -27,19 +27,9 @@ EXEMPT_DIRECTORIES: Set[str] = {"cli", "tests"}
 #: Modules that still import a terminal library, with the part of phase 0 that removes them.
 ALLOWED_UI_IMPORTS: Dict[str, Set[str]] = {
     "cloud_providers/aws.py": {"inquirer"},  # 0d
-    "cloud_providers/base.py": {"rich.print"},  # 0b
     "cloud_providers/gcp.py": {"inquirer"},  # 0d
-    "deployment_strategies/base.py": {"rich.print"},  # 0b
-    "deployment_strategies/monolithic.py": {"inquirer", "rich.print"},  # 0b, 0d
-    "git_repo.py": {"rich.print"},  # 0b
-    "infra_provisioners/ansible_provisioner.py": {"rich.print"},  # 0b
-    "infra_provisioners/base_provisioner.py": {"rich.print"},  # 0b
-    "infra_provisioners/terraform_provisioner.py": {"rich.print"},  # 0b
-    "models.py": {"rich.print"},  # 0b
-    "repo_map.py": {"typer"},  # 0b
-    "service_detector.py": {"inquirer", "rich.print"},  # 0b, 0d
-    "types.py": {"rich.print"},  # 0b
-    "utils.py": {"rich.console", "rich.status"},  # 0b
+    "deployment_strategies/monolithic.py": {"inquirer"},  # 0d
+    "service_detector.py": {"inquirer"},  # 0d
 }
 
 

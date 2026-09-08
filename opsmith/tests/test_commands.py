@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 from opsmith.cli import app as app_module
 from opsmith.cli.output import OutputFormat
 from opsmith.cli.state import CliState
+from opsmith.core.context import OpsmithContext
 
 
 @pytest.fixture
@@ -53,42 +54,51 @@ def test_callback_builds_the_state_from_the_global_options(cli, runner, tmp_proj
     assert result.exit_code == 0
     state: CliState = captured["state"]
     assert isinstance(state, CliState)
-    assert state.src_dir == tmp_project
-    assert state.deployments_path == tmp_project / ".opsmith"
-    assert state.verbose is True
+    assert isinstance(state.context, OpsmithContext)
+    assert state.context.src_dir == tmp_project
+    assert state.context.deployments_path == tmp_project / ".opsmith"
+    assert state.context.verbose is True
     assert state.wait_timeout == 42
     assert state.output is OutputFormat.TEXT
-    assert state.agent is not None
+    assert state.context.agent is not None
+    assert state.context.provisioner_factory is not None
+    assert state.context.events is state.renderer
+
+
+def _run_setup_capturing_the_detector(cli, runner, *extra_args: str):
+    """
+    Runs setup far enough to build the detector, then aborts at the first prompt.
+
+    :param cli: The Typer app under test.
+    :param runner: The CLI runner.
+    :param extra_args: Global options to pass before the command.
+    :return: The patched ServiceDetector class, to read its call arguments from.
+    """
+    with patch("opsmith.cli.commands.setup.ServiceDetector") as detector_class:
+        with patch("opsmith.cli.commands.setup.DeploymentConfig") as config_class:
+            config_class.load.return_value = None
+            with patch("opsmith.cli.commands.setup.inquirer") as inquirer_module:
+                # Abort at the application name prompt, before anything calls the model.
+                inquirer_module.prompt.return_value = None
+                runner.invoke(cli, _base_args(*extra_args, "setup"))
+    return detector_class
 
 
 def test_setup_passes_verbose_through_to_the_detector(cli, runner):
     """
-    --verbose reaches ServiceDetector, which forwards it to RepoMap. Before the split the
-    flag existed but setup never passed it on, so detection was never verbose.
+    --verbose reaches ServiceDetector on the context, which forwards it to RepoMap. Before the
+    split the flag existed but setup never passed it on, so detection was never verbose.
     """
-    with patch("opsmith.cli.commands.setup.ServiceDetector") as detector_class:
-        with patch("opsmith.cli.commands.setup.GitRepo"):
-            with patch("opsmith.cli.commands.setup.DeploymentConfig") as config_class:
-                config_class.load.return_value = None
-                with patch("opsmith.cli.commands.setup.inquirer") as inquirer_module:
-                    # Abort at the application name prompt, before anything calls the model.
-                    inquirer_module.prompt.return_value = None
-                    runner.invoke(cli, _base_args("--verbose", "setup"))
+    detector_class = _run_setup_capturing_the_detector(cli, runner, "--verbose")
 
-    assert detector_class.call_args.kwargs["verbose"] is True
+    assert detector_class.call_args.kwargs["ctx"].verbose is True
 
 
 def test_setup_defaults_to_quiet_detection(cli, runner):
     """Without --verbose the detector is built quiet, as it always was."""
-    with patch("opsmith.cli.commands.setup.ServiceDetector") as detector_class:
-        with patch("opsmith.cli.commands.setup.GitRepo"):
-            with patch("opsmith.cli.commands.setup.DeploymentConfig") as config_class:
-                config_class.load.return_value = None
-                with patch("opsmith.cli.commands.setup.inquirer") as inquirer_module:
-                    inquirer_module.prompt.return_value = None
-                    runner.invoke(cli, _base_args("setup"))
+    detector_class = _run_setup_capturing_the_detector(cli, runner)
 
-    assert detector_class.call_args.kwargs["verbose"] is False
+    assert detector_class.call_args.kwargs["ctx"].verbose is False
 
 
 def test_repomap_reads_verbose_from_the_state(cli, runner):
@@ -101,7 +111,7 @@ def test_repomap_reads_verbose_from_the_state(cli, runner):
         result = runner.invoke(cli, _base_args("--verbose", "repomap"))
 
     assert result.exit_code == 0
-    assert repo_map_class.call_args.kwargs["verbose"] is True
+    assert repo_map_class.call_args.kwargs["ctx"].verbose is True
     assert "a map" in result.stdout
 
 

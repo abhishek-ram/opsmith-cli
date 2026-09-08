@@ -11,9 +11,13 @@ from enum import Enum
 from typing import Dict, List, Optional
 
 import typer
-from rich import print
+from rich.console import Console
+from rich.markup import escape
+from rich.status import Status
+from rich.text import Text
 
 from opsmith.core.errors import OpsmithError
+from opsmith.core.events import STATUS_FINISHED, STATUS_STARTED, Event, EventSink
 
 
 class OutputFormat(str, Enum):
@@ -43,8 +47,68 @@ def command_name(ctx: Optional[typer.Context]) -> str:
     return ctx.info_name or ""
 
 
-class BaseRenderer(abc.ABC):
-    """Writes the outcome of a single command invocation."""
+def build_logo() -> Text:
+    """
+    Builds and returns an ASCII art logo styled with specific colors and text formats.
+    The function creates a stylized representation of a logo using the ``Text`` object.
+    Each line of the logo is appended to the text object with a distinct style, alternating
+    between bold cyan and bold blue.
+
+    :return: Styled ASCII art logo representation.
+    :rtype: Text
+    """
+    ascii_art_logo = Text()
+    ascii_art_logo.append(
+        (
+            "\n \u2588\u2588\u2588\u2588\u2588\u2588  \u2588\u2588\u2588\u2588\u2588\u2588 "
+            " \u2588\u2588\u2588\u2588\u2588\u2588\u2588 \u2588\u2588\u2588    \u2588\u2588\u2588"
+            " \u2588\u2588 \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 \u2588\u2588  "
+            " \u2588\u2588\n"
+        ),
+        style="bold cyan",
+    )
+    ascii_art_logo.append(
+        (
+            "\u2588\u2588    \u2588\u2588 \u2588\u2588   \u2588\u2588 \u2588\u2588     "
+            " \u2588\u2588\u2588\u2588  \u2588\u2588\u2588\u2588 \u2588\u2588    \u2588\u2588   "
+            " \u2588\u2588   \u2588\u2588\n"
+        ),
+        style="bold blue",
+    )
+    ascii_art_logo.append(
+        (
+            "\u2588\u2588    \u2588\u2588 \u2588\u2588\u2588\u2588\u2588\u2588 "
+            " \u2588\u2588\u2588\u2588\u2588\u2588\u2588 \u2588\u2588 \u2588\u2588\u2588\u2588"
+            " \u2588\u2588 \u2588\u2588    \u2588\u2588   "
+            " \u2588\u2588\u2588\u2588\u2588\u2588\u2588\n"
+        ),
+        style="bold cyan",
+    )
+    ascii_art_logo.append(
+        (
+            "\u2588\u2588    \u2588\u2588 \u2588\u2588           \u2588\u2588 \u2588\u2588 "
+            " \u2588\u2588  \u2588\u2588 \u2588\u2588    \u2588\u2588    \u2588\u2588  "
+            " \u2588\u2588\n"
+        ),
+        style="bold blue",
+    )
+    ascii_art_logo.append(
+        (
+            " \u2588\u2588\u2588\u2588\u2588\u2588  \u2588\u2588     "
+            " \u2588\u2588\u2588\u2588\u2588\u2588\u2588 \u2588\u2588      \u2588\u2588"
+            " \u2588\u2588    \u2588\u2588    \u2588\u2588   \u2588\u2588\n\n"
+        ),
+        style="bold cyan",
+    )
+    return ascii_art_logo
+
+
+class BaseRenderer(EventSink):
+    """Writes the progress and the outcome of a single command invocation.
+
+    A renderer is the run's event sink as well as its reporter, so everything the user sees goes
+    through one object and one stream.
+    """
 
     @abc.abstractmethod
     def render_success(
@@ -85,9 +149,85 @@ class BaseRenderer(abc.ABC):
         :param exit_code: The code the command asked to exit with.
         """
 
+    def render_logo(self, logo: Text):
+        """
+        Shows the banner an interactive run opens with. Only the text renderer has one.
+
+        :param logo: The styled banner.
+        """
+
 
 class TextRenderer(BaseRenderer):
-    """Prints what Opsmith printed before the CLI split, using rich."""
+    """Prints what Opsmith printed before the core stopped printing for itself.
+
+    Styling lives here rather than in the events, so an ``Event.message`` stays plain text that
+    reads as well in a JSON envelope as it does on a terminal.
+    """
+
+    #: How each kind of event is styled. A ``step`` event is a heading; the pair that brackets a
+    #: wait is handled separately, as a spinner.
+    STYLES = {
+        "step": "bold blue",
+        "log": None,
+        "warning": "bold yellow",
+        "output": "grey50",
+    }
+
+    def __init__(self, console: Optional[Console] = None):
+        """
+        :param console: The console to write through. One console for both the spinner and the
+            lines it brackets, because two consoles on one stream interleave badly.
+        """
+        self.console = console if console is not None else Console()
+        self._status: Optional[Status] = None
+
+    def emit(self, event: Event):
+        """
+        Renders one event, or starts and stops the spinner that brackets a wait.
+
+        :param event: The event to render.
+        """
+        status = event.data.get("status")
+        if event.kind == "step" and status == STATUS_STARTED:
+            self._start_waiting(event.message)
+            return
+        if event.kind == "step" and status == STATUS_FINISHED:
+            self._stop_waiting()
+            return
+
+        # Every message is escaped, not just subprocess output: an event's message is plain
+        # text, and a terraform resource address or a model's reasoning can contain brackets
+        # that rich would otherwise read as markup.
+        message = escape(event.message)
+        style = self.STYLES.get(event.kind)
+        if event.kind == "step":
+            message = f"\n{message}"
+
+        self.console.print(f"[{style}]{message}[/{style}]" if style else message)
+
+    def _start_waiting(self, message: str):
+        """
+        Shows a spinner for a slow operation.
+
+        :param message: What is being waited for.
+        """
+        self._stop_waiting()
+        self._status = self.console.status(message)
+        self._status.start()
+
+    def _stop_waiting(self):
+        """Clears the spinner, if one is running."""
+        if self._status is not None:
+            self._status.stop()
+            self._status = None
+
+    def render_logo(self, logo: Text):
+        """
+        Prints the banner shown at the top of an interactive run.
+
+        :param logo: The styled banner.
+        """
+        self.console.print(logo)
 
     def render_success(
         self,
@@ -96,8 +236,9 @@ class TextRenderer(BaseRenderer):
         warnings: Optional[List[str]] = None,
     ):
         """Prints any warnings. Commands print their own success messages today."""
+        self._stop_waiting()
         for warning in warnings or []:
-            print(f"[yellow]{warning}[/yellow]")
+            self.console.print(f"[yellow]{warning}[/yellow]")
 
     def render_error(
         self,
@@ -106,17 +247,20 @@ class TextRenderer(BaseRenderer):
         traceback_text: Optional[str] = None,
     ):
         """Prints the error message in red, followed by its hint and optional traceback."""
-        print(f"[bold red]{error.message}[/bold red]")
+        self._stop_waiting()
+        self.console.print(f"[bold red]{error.message}[/bold red]")
         if error.hint:
-            print(f"[yellow]{error.hint}[/yellow]")
+            self.console.print(f"[yellow]{error.hint}[/yellow]")
         if traceback_text:
-            print(f"[dim]{traceback_text}[/dim]")
+            self.console.print(f"[dim]{traceback_text}[/dim]")
 
     def render_aborted(self, command: str, exit_code: int):
         """
-        Prints nothing. A command that exits without an error has already said its piece, and
-        restating it as "exited with code N" is noise a terminal user never used to see.
+        Prints nothing beyond clearing the spinner. A command that exits without an error has
+        already said its piece, and restating it as "exited with code N" is noise a terminal user
+        never used to see.
         """
+        self._stop_waiting()
 
 
 class JsonRenderer(BaseRenderer):
@@ -124,6 +268,15 @@ class JsonRenderer(BaseRenderer):
 
     def __init__(self):
         self._finished = False
+
+    def emit(self, event: Event):
+        """
+        Streams one event to stderr as NDJSON, leaving stdout for the envelope alone.
+
+        :param event: The event to stream.
+        """
+        sys.stderr.write(json.dumps(event.model_dump()) + "\n")
+        sys.stderr.flush()
 
     def render_success(
         self,
