@@ -6,6 +6,7 @@ import inquirer
 import typer
 from rich import print
 
+from opsmith.cli.commands import requires
 from opsmith.cli.state import CliState
 from opsmith.cloud_providers import CLOUD_PROVIDER_REGISTRY
 from opsmith.deployment_strategies import DEPLOYMENT_STRATEGY_REGISTRY
@@ -83,6 +84,7 @@ def _collect_domain_configuration(
     return domain_email, domains
 
 
+@requires("docker", "terraform")
 def deploy(ctx: typer.Context):
     """Deploy the application to a specified environment."""
     state: CliState = ctx.obj

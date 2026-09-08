@@ -19,6 +19,7 @@ license = "GPL-3.0-only"
 requires-python = ">=3.12"
 dependencies = [
     "ansible==14.1.0",
+    "boto3==1.43.33",
     "gitpython==3.1.50",
     "google-api-python-client==2.197.0",
     "google-cloud-compute==1.48.0",
@@ -27,10 +28,9 @@ dependencies = [
     "grep-ast==0.9.0",
     "inquirer==3.4.1",
     "jinja2==3.1.6",
-    "networkx==3.6.1",
-    "pick==2.6.0",
     "pydantic==2.13.4",
-    "pydantic-ai==1.107.0",
+    "pydantic-ai-slim[anthropic,google,openai]==1.107.0",
+    "pydantic-settings==2.9.1",
     "python-dotenv==1.2.2",
     "pyyaml==6.0.3",
     "rich==15.0.0",
@@ -39,6 +39,9 @@ dependencies = [
     "tree-sitter-language-pack==1.9.1",
     "typer==0.27.2",
 ]
+
+[project.optional-dependencies]
+logfire = ["logfire==4.16.0"]
 
 [project.scripts]
 opsmith = "opsmith.main:app"

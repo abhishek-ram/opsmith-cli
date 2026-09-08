@@ -29,6 +29,7 @@ STEP_FRONTEND = "frontend"
 STEP_DESTROY = "destroy"
 STEP_RUN = "run"
 STEP_PROVISION = "provision"
+STEP_CONFIG = "config"
 
 #: Values of ``Event.data["status"]`` on the pair of step events that bracket a wait. A renderer
 #: shows a spinner between them; everything else treats them as two ordinary step events.

@@ -196,8 +196,7 @@ def test_json_mode_keeps_stdout_to_one_document(monkeypatch, tmp_project, runner
     emits progress, subprocess output and a warning still writes exactly one JSON document on
     stdout, and everything else arrives on stderr as NDJSON.
     """
-    monkeypatch.setattr(app_module, "build_agent", lambda **kwargs: object())
-    monkeypatch.setattr(app_module, "_check_external_dependencies", lambda: None)
+    monkeypatch.setattr(app_module, "configure_agent", lambda *args, **kwargs: object())
     monkeypatch.chdir(tmp_project)
 
     def reports_progress(ctx: typer.Context):

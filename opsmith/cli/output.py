@@ -149,6 +149,18 @@ class BaseRenderer(EventSink):
         :param exit_code: The code the command asked to exit with.
         """
 
+    @abc.abstractmethod
+    def render_document(self, text: str):
+        """
+        Writes a document a command produced, such as a schema or a configuration file.
+
+        This is the one thing a command writes that is not part of the envelope, because in text
+        mode it is the whole point of the command and has to survive a redirect intact. In JSON
+        mode the envelope's result carries it instead, so it is dropped.
+
+        :param text: The document, exactly as it should appear.
+        """
+
     def render_logo(self, logo: Text):
         """
         Shows the banner an interactive run opens with. Only the text renderer has one.
@@ -221,6 +233,16 @@ class TextRenderer(BaseRenderer):
             self._status.stop()
             self._status = None
 
+    def render_document(self, text: str):
+        """
+        Prints a document verbatim, so that redirecting stdout produces the file the user asked
+        for. Markup, highlighting and wrapping are all off: this is not a message.
+
+        :param text: The document to print.
+        """
+        self._stop_waiting()
+        self.console.print(text, markup=False, highlight=False, soft_wrap=True)
+
     def render_logo(self, logo: Text):
         """
         Prints the banner shown at the top of an interactive run.
@@ -277,6 +299,9 @@ class JsonRenderer(BaseRenderer):
         """
         sys.stderr.write(json.dumps(event.model_dump()) + "\n")
         sys.stderr.flush()
+
+    def render_document(self, text: str):
+        """Drops the document: the envelope's result carries it in JSON mode."""
 
     def render_success(
         self,

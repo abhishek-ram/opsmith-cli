@@ -218,7 +218,7 @@ class GoogleGlaGemini3Pro(BaseAiModel):
 
     @classmethod
     def provider(cls) -> str:
-        return "google-gla"
+        return "google"
 
     @classmethod
     def api_key_prefix(cls) -> str:

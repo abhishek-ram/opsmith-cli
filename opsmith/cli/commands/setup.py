@@ -1,55 +1,58 @@
 """The `setup` command: detect services and write the deployment configuration."""
 
+from typing import List
+
 import inquirer
 import typer
 import yaml
-from pydantic import ValidationError
 from rich import print
 
+from opsmith.cli.commands import requires
 from opsmith.cli.state import CliState
+from opsmith.core.config import ConfigIssue, parse_infra_deps, parse_service
+from opsmith.core.errors import InvalidConfig
 from opsmith.service_detector import ServiceDetector
-from opsmith.types import DeploymentConfig, InfrastructureDependency, ServiceInfo
+from opsmith.types import DeploymentConfig
 from opsmith.utils import slugify
 
 
+def _report_issues(heading: str, issues: List[ConfigIssue]):
+    """
+    Shows the problems found in an edited document, so the editor can be reopened on them.
+
+    :param heading: What was being edited.
+    :param issues: The problems found in it.
+    """
+    for issue in issues:
+        location = f"{issue.path}: " if issue.path else ""
+        print(f"\n[red]>>[/red] {heading}: {location}{issue.message}\n")
+
+
 def _validate_service_config(_, config_yaml: str) -> bool:
-    try:
-        data = yaml.safe_load(config_yaml)
-        ServiceInfo(**data)
-        return True
-    except (yaml.YAMLError, ValidationError) as e:
-        print(f"\n[red]>>[/red] Invalid service configuration: {e}\n")
-        return False
+    """
+    Validates an edited service, in the ``(answers, value) -> bool`` shape inquirer expects.
+
+    :param config_yaml: The YAML the user edited.
+    :return: Whether it is usable, which is what decides if inquirer reopens the editor.
+    """
+    _, issues = parse_service(config_yaml)
+    _report_issues("Invalid service configuration", issues)
+    return not issues
 
 
 def _validate_infra_deps_config(_, config_yaml: str) -> bool:
-    try:
-        if "user_choice" in config_yaml:
-            raise ValueError(
-                "Provider is 'user_choice'. Please replace it with a valid provider.",
-            )
+    """
+    Validates the edited dependency list, in the shape inquirer expects.
 
-        data = yaml.safe_load(config_yaml)
-        if not isinstance(data, list):
-            raise ValueError("Configuration must be a YAML list of dependencies.")
-
-        deps = [InfrastructureDependency(**item) for item in data]
-
-        seen_providers = set()
-        for dep in deps:
-            if dep.provider in seen_providers:
-                print("Duplicate provider")
-                raise ValueError(
-                    f"Duplicate provider found: {dep.provider}. Each provider can only be"
-                    " listed once."
-                )
-            seen_providers.add(dep.provider)
-        return True
-    except (yaml.YAMLError, ValidationError, ValueError) as e:
-        print(f"\n[red]>>[/red] Invalid dependency configuration: {e}\n")
-        return False
+    :param config_yaml: The YAML the user edited.
+    :return: Whether it is usable, which is what decides if inquirer reopens the editor.
+    """
+    _, issues = parse_infra_deps(config_yaml)
+    _report_issues("Invalid dependency configuration", issues)
+    return not issues
 
 
+@requires("docker", "terraform")
 def setup(ctx: typer.Context):
     """
     Setup the deployment configuration for the repository.
@@ -122,8 +125,12 @@ def setup(ctx: typer.Context):
                 )
             ]
             answers = inquirer.prompt(questions)
-            confirmed_service_data = yaml.safe_load(answers["config"])
-            confirmed_service = ServiceInfo(**confirmed_service_data)
+            confirmed_service, issues = parse_service(answers["config"])
+            if confirmed_service is None:
+                raise InvalidConfig(
+                    "The edited service configuration is not usable.",
+                    details={"errors": [issue.model_dump() for issue in issues]},
+                )
             confirmed_services.append(confirmed_service)
 
             print("\n[bold blue]Generating Dockerfile for the updated service...[/bold blue]")
@@ -148,10 +155,13 @@ def setup(ctx: typer.Context):
                 )
             ]
             answers = inquirer.prompt(questions)
-            confirmed_deps_data = yaml.safe_load(answers["config"])
-            deployment_config.infra_deps = [
-                InfrastructureDependency(**data) for data in confirmed_deps_data
-            ]
+            confirmed_deps, issues = parse_infra_deps(answers["config"])
+            if confirmed_deps is None:
+                raise InvalidConfig(
+                    "The edited dependency configuration is not usable.",
+                    details={"errors": [issue.model_dump() for issue in issues]},
+                )
+            deployment_config.infra_deps = confirmed_deps
 
     # Create/Update and Save Configuration
     config_path = deployment_config.save(state.deployments_path)

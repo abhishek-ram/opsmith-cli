@@ -131,6 +131,42 @@ opsmith --model anthropic:claude-3-7-sonnet-20250219 --api-key YOUR_ANTHROPIC_AP
 opsmith --model google-gla:gemini-2.5-pro --api-key YOUR_GEMINI_API_KEY COMMAND
 ```
 
+Neither option has to be typed. Opsmith looks for the model in `--model`, then in `OPSMITH_MODEL`,
+then in a `model:` entry in `.opsmith.conf.yml`; and for the key in `--api-key`, then in the
+provider's own variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY` or `GEMINI_API_KEY`). That keeps the
+secret off the command line and out of your shell history:
+
+```shell
+export OPSMITH_MODEL=google-gla:gemini-2.5-pro
+export GEMINI_API_KEY=...
+opsmith COMMAND
+```
+
+A missing or unknown model stops the run with the list of models Opsmith knows.
+
+### Checking your configuration
+
+`opsmith config` reads `.opsmith/deployments.yml` and needs no cloud account, docker or terraform,
+so it works anywhere the package is installed:
+
+```shell
+opsmith config validate            # exits 0 if the configuration is usable, 2 with the problems if not
+opsmith config show                # the configuration as Opsmith understands it
+opsmith config schema              # the JSON Schema of the configuration
+opsmith config schema --format markdown > SCHEMA.md
+```
+
+Add `--output json` to any command for a single JSON document on stdout, with progress on stderr.
+
+### Tracing
+
+Tracing through [Logfire](https://logfire.pydantic.dev/) is an optional extra:
+
+```shell
+pip install "opsmith-cli[logfire]"
+opsmith --logfire-token YOUR_TOKEN COMMAND
+```
+
 ### Cloud Providers
 
 Opsmith uses your cloud provider's command-line tools to authenticate and manage resources. Before using Opsmith, you need to configure the credentials for your chosen cloud provider.

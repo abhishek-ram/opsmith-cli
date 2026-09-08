@@ -23,6 +23,13 @@ class CliState:
     renderer: BaseRenderer
     verbose: bool = False
 
+    # The model options exactly as they were given. They are resolved into the context's agent
+    # just before a command body runs, rather than in the callback, so that reading a
+    # subcommand's --help never requires a configured model.
+    model: Optional[str] = None
+    api_key: Optional[str] = None
+    logfire_token: Optional[str] = None
+
     # Headless options. Parsed and carried here from part 0a so the command line surface is
     # stable; part 0e is what actually honours them.
     non_interactive: bool = False

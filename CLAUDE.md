@@ -18,14 +18,27 @@ pre-commit run --all-files               # isort, black --preview -l 100, flake8
 
 uv run opsmith --model anthropic:claude-sonnet-4-6 --api-key "$KEY" setup
 uv run opsmith --model ... --api-key ... --output json repomap   # machine-readable mode
+
+OPSMITH_MODEL=anthropic:claude-sonnet-4-6 ANTHROPIC_API_KEY="$KEY" \
+  uv run opsmith --output json config validate    # no flags, no docker, no terraform
 ```
 
 Format through `pre-commit`, not a locally installed `black`: the hook pins 23.3.0, and a newer
 black disagrees with it about wrapping implicitly concatenated strings, so the two will fight.
 
-`--model` and `--api-key` are required global options on every invocation, before the subcommand.
-`opsmith setup` and `opsmith deploy` both need `docker` and `terraform` on `PATH` and will exit if
-either is missing.
+A model is always required, but neither option has to be typed: `opsmith/core/llm.py` resolves the
+model from `--model`, then `OPSMITH_MODEL`, then `model:` in `.opsmith.conf.yml`, and the key from
+`--api-key`, then the provider's own variable. Both are resolved together, so option order does not
+matter, and anything missing or unknown is `INVALID_ARGUMENT`. The settings file is never read for
+a key.
+
+`handle_errors` is what holds the preconditions of a command body: the external tools the command
+declared with `@requires("docker", "terraform")`, then the agent. Both happen there, once, just
+before the body, rather than in the callback — click runs the group callback before it reaches a
+subcommand's `--help`, so resolving there would make `opsmith setup --help` demand the very
+configuration it is explaining. A command that declares no tools is never probed for any, which is
+what lets `opsmith config validate` run on a machine with neither docker nor terraform; the
+terraform version the check parses is recorded on the context for phase 3.
 
 ## Architecture
 
@@ -33,8 +46,8 @@ either is missing.
 
 | Module | Holds |
 |--------|-------|
-| `cli/` | Everything that knows about a terminal: `app.py` (Typer assembly, global options, the error handler), `output.py` (renderers), `state.py` (`CliState`), `commands/` (one per command) |
-| `core/` | Orchestration that never touches a terminal: `errors.py`, `events.py`, `context.py`, `provisioners.py` |
+| `cli/` | Everything that knows about a terminal: `app.py` (Typer assembly, global options, the error handler), `output.py` (renderers), `state.py` (`CliState`), `commands/` (one per command, plus the `@requires` declaration in its `__init__.py`) |
+| `core/` | Orchestration that never touches a terminal: `errors.py`, `events.py`, `context.py`, `provisioners.py`, `llm.py`, `config.py` |
 | `cloud_providers/` | AWS and GCP, plus the registry third parties plug into |
 | `deployment_strategies/` | `base.py` holds the shared steps, `monolithic.py` composes them |
 | `infra_provisioners/` | Terraform and Ansible wrappers; the only code that shells out |
@@ -58,6 +71,10 @@ Everything else follows from that rule:
   markup; `opsmith/cli/output.py` decides how it looks. `TextRenderer` styles by event kind and
   turns a `waiting` pair into a rich spinner; `JsonRenderer` streams NDJSON to stderr so stdout
   carries exactly one envelope.
+- **Validation is `core/config.py`.** Parsing and validating `deployments.yml` returns a list of
+  `ConfigIssue`, never a print and never a bool. The `setup` editors and `opsmith config validate`
+  call the same functions, so a config written by an agent meets the rules a person editing one
+  meets.
 - **Failures are `OpsmithError`.** `opsmith/core/errors.py` holds the hierarchy and `EXIT_CODES`,
   the single code-to-exit-code map. Core code raises; `handle_errors` in `opsmith/cli/app.py` turns
   the error into an envelope and an exit code. Anything not an `OpsmithError` becomes `INTERNAL`/1.
@@ -128,8 +145,8 @@ anything structural.
 - `docs/reference/` — how the system works today. Written in the present tense, maintained.
 
 A spec is written before the work and stops changing once it ships; do not amend one to match what
-was built. Parts `0a` (CLI split and errors) and `0b` (context, events, provisioner injection) have
-landed. `0d` empties the boundary allowlist by moving the remaining `inquirer` calls behind an
+was built. Parts `0a` (CLI split and errors), `0b` (context, events, provisioner injection) and
+`0c` (model configuration, tool checks, the `config` commands) have landed. `0d` empties the boundary allowlist by moving the remaining `inquirer` calls behind an
 `Interaction` API — leave prompts where they are until then.
 
 ## Conventions

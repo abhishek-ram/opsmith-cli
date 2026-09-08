@@ -12,16 +12,19 @@ from opsmith.cli import app as app_module
 from opsmith.cli.output import OutputFormat
 from opsmith.cli.state import CliState
 from opsmith.core.context import OpsmithContext
+from opsmith.utils import ExternalToolReport
 
 
 @pytest.fixture
 def cli(monkeypatch, tmp_project):
     """
-    Returns the real Typer app with the two callback steps that need a deployment machine
-    stubbed out: building the agent, and checking for docker and terraform.
+    Returns the real Typer app with the two steps that need a deployment machine stubbed out:
+    building the agent, and probing for docker and terraform.
     """
-    monkeypatch.setattr(app_module, "build_agent", lambda **kwargs: MagicMock())
-    monkeypatch.setattr(app_module, "_check_external_dependencies", lambda: None)
+    monkeypatch.setattr(app_module, "configure_agent", lambda *args, **kwargs: MagicMock())
+    monkeypatch.setattr(
+        app_module, "check_external_tools", lambda tools: ExternalToolReport(missing=[])
+    )
     monkeypatch.chdir(tmp_project)
     return app_module.app
 

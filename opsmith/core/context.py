@@ -51,6 +51,10 @@ class OpsmithContext:
         self.verbose = verbose
         self._git_repo = git_repo
 
+        # Recorded by the CLI when a command that requires terraform checks for it, so a later
+        # step can read the version without probing again.
+        self.terraform_version: Optional[str] = None
+
         # Filled in by later parts of phase 0. Declared here so those parts only have to assign
         # them, and so a strategy can check for one without knowing which part shipped it.
         self.interact: Optional[Any] = None  # 0d: the Interaction implementation

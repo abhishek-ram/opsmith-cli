@@ -11,15 +11,14 @@ import os
 import sys
 import traceback
 from pathlib import Path
-from typing import Annotated, Any, Callable, Dict, List, Optional, Type, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-import logfire
 import rich
 import typer
-from rich import print
 
-from opsmith.agent import build_agent
-from opsmith.cli.commands import analyze, deploy, setup
+from opsmith.cli.commands import analyze
+from opsmith.cli.commands import config as config_commands
+from opsmith.cli.commands import deploy, requirements_of, setup
 from opsmith.cli.output import (
     BaseRenderer,
     OutputFormat,
@@ -31,15 +30,19 @@ from opsmith.cli.output import (
 from opsmith.cli.state import CliState
 from opsmith.cloud_providers import CLOUD_PROVIDER_REGISTRY
 from opsmith.core.context import OpsmithContext
-from opsmith.core.errors import EXIT_CODES, OpsmithError
+from opsmith.core.errors import EXIT_CODES, InvalidArgument, OpsmithError
 from opsmith.core.events import EventSink
+from opsmith.core.llm import configure_agent, resolve_model_config
 from opsmith.core.provisioners import ProvisionerFactory
 from opsmith.deployment_strategies import DEPLOYMENT_STRATEGY_REGISTRY
-from opsmith.models import MODEL_REGISTRY, BaseAiModel
+from opsmith.models import MODEL_REGISTRY
 from opsmith.settings import settings
-from opsmith.utils import get_missing_external_dependencies
+from opsmith.utils import check_external_tools
 
 app = typer.Typer(pretty_exceptions_show_locals=False)
+config_app = typer.Typer(
+    help="Inspect and validate the deployment configuration, without touching a cloud."
+)
 
 
 def _drain_registry_events(events: EventSink):
@@ -55,75 +58,25 @@ def _drain_registry_events(events: EventSink):
         registry.pending_events.drain_into(events)
 
 
-def _check_external_dependencies():
+def _configure_logfire(token: str):
     """
-    Checks if a list of external command-line tools are installed and operational.
-    Exits the application if any dependency is not found or non-operational.
+    Turns on Logfire tracing for this run.
 
+    Logfire is an optional extra, so it is imported here rather than at the top of the module: a
+    user who never passes a token never needs it installed.
+
+    :param token: The Logfire token to report with.
+    :raises InvalidArgument: The extra is not installed.
     """
-    missing_deps = get_missing_external_dependencies(["docker", "terraform"])
-    if missing_deps:
-        print(
-            "[red]Required dependencies not found or not running:[/red] [bold"
-            f" red]{', '.join(missing_deps)}[/bold red]"
-        )
-        print("[red]Please install them and ensure they are in your system's PATH.[/red]")
-        raise typer.Exit(code=1)
-
-
-def _parse_model_arg(model: Union[str, BaseAiModel]) -> BaseAiModel:
-    """
-    Fetches the class corresponding to the given model name.
-
-    Attempts to retrieve the class for the provided model from
-    the model registry. If the model name is not found in
-    the registry, an error is raised indicating that the model is unsupported.
-
-    :param model: The name of the model for which the class is required.
-    :type model: str
-
-    :return: The class corresponding to the provided model name.
-    :rtype: Type[BaseAiModel]
-
-    :raises ValueError: If the given model name is not found in the model registry.
-    :raises typer.BadParameter: If the provided model name is unsupported.
-    """
-    if isinstance(model, BaseAiModel):
-        return model
     try:
-        return MODEL_REGISTRY.get_model_class(model)()
-    except ValueError:
-        raise typer.BadParameter(
-            f"Unsupported model name: {model}, must be one of: {MODEL_REGISTRY.model_names}"
-        )
+        import logfire
+    except ImportError as err:
+        raise InvalidArgument(
+            "Logfire tracing was requested but logfire is not installed.",
+            hint='Install it with: pip install "opsmith-cli[logfire]"',
+        ) from err
 
-
-def _api_key_callback(ctx: typer.Context, value: str):
-    """
-    This function serves as a callback for validating and processing an API key when
-    used in conjunction with a command-line interface. The function checks whether
-    the mandatory `--model` option is set before associating it with the provided
-    API key. If validation passes, it ensures the API key authentication process
-    is triggered for the specified model configuration.
-
-    Raises a BadParameter error if `--model` was not supplied before `--api-key`.
-
-    :param ctx: The Typer context object that contains information about the
-        current command execution context, including provided options and other
-        runtime parameters.
-    :type ctx: typer.Context
-    :param value: The API key provided by the user via the `--api-key` option
-        during the command-line execution.
-    :type value: str
-    :return: The validated API key after ensuring it is associated with the
-        specified model configuration.
-    :rtype: str
-    """
-    if "model" not in ctx.params:
-        raise typer.BadParameter("The --model option must be specified before --api-key.")
-    model_class = ctx.params["model"]
-    model_class.ensure_auth(value)
-    return value
+    logfire.configure(token=token, scrubbing=False)
 
 
 def _state_of(ctx: Optional[typer.Context]) -> Optional[CliState]:
@@ -213,6 +166,57 @@ def _report_passthrough_exit(ctx: Optional[typer.Context], exit_code: int) -> No
     _renderer_of(ctx).render_aborted(command_name(ctx), exit_code)
 
 
+def _ensure_external_tools(ctx: Optional[typer.Context], tools: Tuple[str, ...]):
+    """
+    Checks the external tools a command declared, before its body runs.
+
+    A command that declared none is not checked at all, which is what lets ``config validate``
+    run on a machine with neither docker nor terraform installed.
+
+    :param ctx: The Typer context of the command about to run.
+    :param tools: The tools the command declared through ``@requires``.
+    :raises InvalidArgument: One of them is missing or not working.
+    """
+    if not tools:
+        return
+
+    report = check_external_tools(tools)
+    if report.missing:
+        raise InvalidArgument(
+            f"Required dependencies not found or not running: {', '.join(report.missing)}.",
+            hint="Please install them and ensure they are in your system's PATH.",
+            details={"missing": report.missing},
+        )
+
+    state = _state_of(ctx)
+    if state is not None and "terraform" in report.versions:
+        state.context.terraform_version = report.versions["terraform"]
+
+
+def _prepare_agent(ctx: Optional[typer.Context]):
+    """
+    Resolves the model configuration and builds the agent, once, before a command body runs.
+
+    This happens here rather than in the callback because click runs the group callback before it
+    reaches a subcommand's ``--help``: resolving there would mean ``opsmith setup --help`` insists
+    on the very configuration the help is there to explain.
+
+    :param ctx: The Typer context of the command about to run.
+    :raises InvalidArgument: No usable model or API key was configured.
+    """
+    state = _state_of(ctx)
+    if state is None or state.context.agent is not None:
+        return
+
+    if state.logfire_token:
+        _configure_logfire(state.logfire_token)
+
+    # Resolved in one place rather than in an option callback, so that the order of --model and
+    # --api-key does not matter and a bad value is an OpsmithError like any other.
+    model_config = resolve_model_config(state.model, state.api_key)
+    state.context.agent = configure_agent(model_config, instrument=bool(state.logfire_token))
+
+
 def _context_param_name(func: Callable) -> Optional[str]:
     """
     Finds the name of the parameter Typer fills with the context.
@@ -233,15 +237,21 @@ def handle_errors(func: Callable) -> Callable:
     """
     Wraps a command body so its outcome becomes exactly one envelope and one exit code.
 
+    It also holds what has to be true before a body runs: the external tools the command
+    declared are working, and the run has a configured agent.
+
     :param func: The command function to wrap.
     :return: The wrapped function, with its signature preserved for Typer.
     """
     context_param = _context_param_name(func)
+    tools = requirements_of(func)
 
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         ctx: Optional[typer.Context] = kwargs.get(context_param) if context_param else None
         try:
+            _ensure_external_tools(ctx, tools)
+            _prepare_agent(ctx)
             result = func(*args, **kwargs)
         except typer.Exit as exit_exc:
             _report_passthrough_exit(ctx, exit_exc.exit_code)
@@ -264,26 +274,22 @@ def handle_errors(func: Callable) -> Callable:
 @app.callback()
 def main(
     ctx: typer.Context,
-    model: Annotated[
-        Type[BaseAiModel],
-        typer.Option(
-            parser=_parse_model_arg,
-            help="The LLM model to be used for by the AI Agent.",
-            prompt="Select the LLM model to be used for by the AI Agent",
+    model: Optional[str] = typer.Option(
+        None,
+        "--model",
+        help=(
+            "The LLM model to be used by the AI Agent, as provider:name. Required unless"
+            " OPSMITH_MODEL is set or .opsmith.conf.yml names one."
         ),
-    ],
-    api_key: Annotated[
-        str,
-        typer.Option(
-            callback=_api_key_callback,
-            help=(
-                "The API KEY to be used for by the AI Agent. This is the API key for the specified"
-                " model."
-            ),
-            prompt="Enter the API KEY for the specified model",
-            hide_input=True,
+    ),
+    api_key: Optional[str] = typer.Option(
+        None,
+        "--api-key",
+        help=(
+            "The API key for the specified model. Required unless the provider's own key"
+            " variable, such as ANTHROPIC_API_KEY, is set."
         ),
-    ],
+    ),
     logfire_token: Optional[str] = typer.Option(
         default=None,
         help=(
@@ -362,6 +368,9 @@ def main(
         output=output,
         renderer=renderer,
         verbose=verbose,
+        model=model,
+        api_key=api_key,
+        logfire_token=logfire_token,
         non_interactive=non_interactive,
         inline_answers=list(answer or []),
         answers_file=answers,
@@ -383,12 +392,6 @@ def main(
             renderer.render_logo(build_logo())
 
         _drain_registry_events(renderer)
-
-        if logfire_token:
-            logfire.configure(token=logfire_token, scrubbing=False)
-
-        ctx.obj.context.agent = build_agent(model_config=model, instrument=bool(logfire_token))
-        _check_external_dependencies()
     except typer.Exit as exit_exc:
         _report_passthrough_exit(ctx, exit_exc.exit_code)
         raise
@@ -403,3 +406,8 @@ def main(
 app.command()(handle_errors(setup.setup))
 app.command()(handle_errors(deploy.deploy))
 app.command()(handle_errors(analyze.repomap))
+
+config_app.command("validate")(handle_errors(config_commands.validate))
+config_app.command("schema")(handle_errors(config_commands.schema))
+config_app.command("show")(handle_errors(config_commands.show))
+app.add_typer(config_app, name="config")

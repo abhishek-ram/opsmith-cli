@@ -64,11 +64,10 @@ def probe_app(monkeypatch, tmp_project):
     Builds a Typer app that uses the real callback and the real error handler, with a set of
     probe commands that fail in each of the ways the contract describes.
 
-    The two things the callback does that need a machine set up for deployment - building the
-    agent and checking for docker and terraform - are stubbed out.
+    Building the agent, the one thing the callback does that needs a configured model, is
+    stubbed out. The probe commands declare no external tools, so nothing looks for docker.
     """
-    monkeypatch.setattr(app_module, "build_agent", lambda **kwargs: object())
-    monkeypatch.setattr(app_module, "_check_external_dependencies", lambda: None)
+    monkeypatch.setattr(app_module, "configure_agent", lambda *args, **kwargs: object())
     monkeypatch.chdir(tmp_project)
 
     def succeeds(ctx: typer.Context):
