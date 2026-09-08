@@ -6,10 +6,7 @@ from typing import Dict, List, Optional, Tuple, Type
 from google.genai.types import ThinkingConfigDict, ThinkingLevel
 from pydantic_ai.models.anthropic import AnthropicModelSettings
 from pydantic_ai.models.google import GoogleModelSettings
-from pydantic_ai.models.openai import (
-    OpenAIChatModelSettings,
-    OpenAIResponsesModelSettings,
-)
+from pydantic_ai.models.openai import OpenAIResponsesModelSettings
 from pydantic_ai.settings import ModelSettings
 
 from opsmith.core.events import STEP_REGISTRY, BufferingSink
@@ -141,6 +138,9 @@ class OpenAIGPT55(BaseAiModel):
 
     @classmethod
     def provider(cls) -> str:
+        # Bare "openai" is the Responses API as of pydantic-ai 2.0. The prefix is kept rather
+        # than pinned to "openai-chat" because it is the name users pass to --model and write
+        # into .opsmith.conf.yml.
         return "openai"
 
     @classmethod
@@ -150,7 +150,7 @@ class OpenAIGPT55(BaseAiModel):
     @classmethod
     def get_model_settings(cls) -> ModelSettings:
         """Returns model-specific settings."""
-        return OpenAIChatModelSettings(openai_reasoning_effort="high")
+        return OpenAIResponsesModelSettings(openai_reasoning_effort="high")
 
 
 class OpenAIGPT55Pro(BaseAiModel):
@@ -160,7 +160,8 @@ class OpenAIGPT55Pro(BaseAiModel):
 
     @classmethod
     def provider(cls) -> str:
-        # Pro reasoning models are only served via the OpenAI Responses API.
+        # Spelled out rather than left as bare "openai", which resolves to the same API,
+        # so that the name recorded in a config keeps working whatever the prefix defaults to.
         return "openai-responses"
 
     @classmethod

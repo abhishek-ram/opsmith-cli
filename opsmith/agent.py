@@ -3,7 +3,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Type
 
-from pydantic_ai import Agent, ModelRetry, RunContext
+from pydantic_ai import Agent, AgentCapability, ModelRetry, RunContext
+from pydantic_ai.capabilities import Instrumentation
 
 from opsmith.models import BaseAiModel
 from opsmith.prompts import SYSTEM_PROMPT
@@ -36,11 +37,23 @@ def is_duplicate_tool_call(ctx: RunContext[AgentDeps], tool_name: str) -> bool:
 
 
 def build_agent(model_config: Type[BaseAiModel], instrument: bool = False) -> Agent:
+    """
+    Builds the pydantic-ai agent every model call in a run goes through.
+
+    :param model_config: The model class the run resolved to.
+    :param instrument: Whether to emit OpenTelemetry spans for the run, which is what a
+        configured logfire token turns on.
+    :return: The agent, with the repo-reading and secret-generating tools registered.
+    """
+    # Tracing is a capability rather than a constructor flag as of pydantic-ai 2.0, and the list
+    # is empty when there is nowhere to send the spans.
+    capabilities: List[AgentCapability] = [Instrumentation()] if instrument else []
+
     agent = Agent(
         model=model_config.model_name_abs(),
         model_settings=model_config.get_model_settings(),
         instructions=SYSTEM_PROMPT,
-        instrument=instrument,
+        capabilities=capabilities,
         deps_type=AgentDeps,
     )
 

@@ -104,13 +104,13 @@ Opsmith leverages Large Language Models (LLMs) to analyze your codebase, generat
 Opsmith supports a variety of models from different providers. Here is a list of the currently supported models:
 
 - **Google** (Recommended):
-  - `google-gla:gemini-2.5-pro`
+  - `google:gemini-3.1-pro-preview`
 - **OpenAI**:
-  - `openai:gpt-4.1`
-  - `openai:gpt-o3`
+  - `openai:gpt-5.5`
+  - `openai-responses:gpt-5.5-pro`
 - **Anthropic**:
-  - `anthropic:claude-3-7-sonnet-20250219`
-  - `anthropic:claude-sonnet-4-20250514`
+  - `anthropic:claude-sonnet-4-6`
+  - `anthropic:claude-opus-4-8`
 
 #### Usage
 
@@ -118,17 +118,17 @@ To specify which model to use, pass the `--model` option with the full model nam
 
 **Example with OpenAI:**
 ```shell
-opsmith --model openai:gpt-4.1 --api-key YOUR_OPENAI_API_KEY COMMAND
+opsmith --model openai:gpt-5.5 --api-key YOUR_OPENAI_API_KEY COMMAND
 ```
 
 **Example with Anthropic:**
 ```shell
-opsmith --model anthropic:claude-3-7-sonnet-20250219 --api-key YOUR_ANTHROPIC_API_KEY COMMAND
+opsmith --model anthropic:claude-sonnet-4-6 --api-key YOUR_ANTHROPIC_API_KEY COMMAND
 ```
 
 **Example with Google:**
 ```shell
-opsmith --model google-gla:gemini-2.5-pro --api-key YOUR_GEMINI_API_KEY COMMAND
+opsmith --model google:gemini-3.1-pro-preview --api-key YOUR_GEMINI_API_KEY COMMAND
 ```
 
 Neither option has to be typed. Opsmith looks for the model in `--model`, then in `OPSMITH_MODEL`,
@@ -137,7 +137,7 @@ provider's own variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY` or `GEMINI_API_KE
 secret off the command line and out of your shell history:
 
 ```shell
-export OPSMITH_MODEL=google-gla:gemini-2.5-pro
+export OPSMITH_MODEL=google:gemini-3.1-pro-preview
 export GEMINI_API_KEY=...
 opsmith COMMAND
 ```
