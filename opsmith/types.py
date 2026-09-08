@@ -12,7 +12,7 @@ from opsmith.cloud_providers.base import (
     BaseCloudProviderDetail,
     CpuArchitectureEnum,
 )
-from opsmith.exceptions import MonolithicDeploymentError
+from opsmith.core.errors import UnknownEnvironment
 from opsmith.settings import settings
 
 
@@ -315,7 +315,11 @@ class MonolithicDeploymentState(BaseModel):
     def load(cls: Type["MonolithicDeploymentState"], path: Path) -> "MonolithicDeploymentState":
         """Loads the monolithic deployment state from a YAML file."""
         if not path.exists():
-            raise MonolithicDeploymentError(f"State file '{path}' does not exist.")
+            raise UnknownEnvironment(
+                f"State file '{path}' does not exist.",
+                hint="Run 'opsmith deploy' for this environment first.",
+                details={"path": str(path)},
+            )
 
         with open(path, "r", encoding="utf-8") as f:
             config_data = yaml.safe_load(f)

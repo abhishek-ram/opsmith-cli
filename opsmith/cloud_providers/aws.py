@@ -10,11 +10,11 @@ from pydantic import Field
 from opsmith.cloud_providers.base import (
     BaseCloudProvider,
     BaseCloudProviderDetail,
-    CloudCredentialsError,
     CpuArchitectureEnum,
     MachineType,
     MachineTypeList,
 )
+from opsmith.core.errors import CloudCredentialsError
 from opsmith.utils import WaitingSpinner
 
 

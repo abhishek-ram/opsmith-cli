@@ -2079,7 +2079,7 @@ wheels = [
 
 [[package]]
 name = "opsmith-cli"
-version = "0.4.5b0"
+version = "0.4.6b0"
 source = { editable = "." }
 dependencies = [
     { name = "ansible" },
@@ -2132,7 +2132,7 @@ requires-dist = [
     { name = "tqdm", specifier = "==4.68.3" },
     { name = "tree-sitter", specifier = "==0.25.2" },
     { name = "tree-sitter-language-pack", specifier = "==1.9.1" },
-    { name = "typer", specifier = "==0.26.7" },
+    { name = "typer", specifier = "==0.27.2" },
 ]
 
 [package.metadata.requires-dev]
@@ -3334,7 +3334,7 @@ wheels = [
 
 [[package]]
 name = "typer"
-version = "0.26.7"
+version = "0.27.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "annotated-doc" },
@@ -3342,9 +3342,9 @@ dependencies = [
     { name = "rich" },
     { name = "shellingham" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/5e/ed/ef06584ccdd5c410df0837951ecd7e15d9a6144ea1bd4c73cecab1a89891/typer-0.26.7.tar.gz", hash = "sha256:e314a34c617e419c091b2830dda3ea1f257134ff593061a8f5b9717ab8dddb3a", size = 201709 }
+sdist = { url = "https://files.pythonhosted.org/packages/16/f7/57713ba479fd405eb76de31404b2c744c289e336b2d999511ebf51e496f7/typer-0.27.2.tar.gz", hash = "sha256:269b7eb9d3c202ca84b4bc9618cb04ebb43d3d4d1e567e4c768607232c05f945", size = 204045 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/24/25/2201973529af2c954de0bb725323c3aaed6d7f0ceee8f550dec9185df013/typer-0.26.7-py3-none-any.whl", hash = "sha256:5c87cfbc5d34491c5346ebf49c23e18d56ccb863268d3a8d592b26087c2f5e58", size = 122456 },
+    { url = "https://files.pythonhosted.org/packages/dc/bf/205d0004930ede8f542fb58f601526fccf4ae7626075ca1e6c4de5d3d652/typer-0.27.2-py3-none-any.whl", hash = "sha256:b3a5fc4342d5fc8fda8fc3010b1cf117e9249aab7fae800c2eff62fd3842d97d", size = 123130 },
 ]
 
 [[package]]

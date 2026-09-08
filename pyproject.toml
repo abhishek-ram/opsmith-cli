@@ -37,7 +37,7 @@ dependencies = [
     "tqdm==4.68.3",
     "tree-sitter==0.25.2",
     "tree-sitter-language-pack==1.9.1",
-    "typer==0.26.7",
+    "typer==0.27.2",
 ]
 
 [project.scripts]
@@ -65,3 +65,8 @@ dev = [
 
 [tool.black]
 line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["opsmith/tests"]
+python_files = ["test_*.py"]
+addopts = "-q"

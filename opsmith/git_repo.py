@@ -6,31 +6,36 @@ from pathlib import Path
 from typing import List
 
 import git
-import typer
 from rich import print
+
+from opsmith.core.errors import NotAGitRepository
 
 
 class GitRepo:
     def __init__(self, root_dir: Path):
         """
         Initialize a Git repository object for the specified directory, or its parent directories
-        if it is a subdirectory, ensuring it belongs to an actual Git repository. If the provided
-        directory is not within a Git repository, it exits the program with an error.
+        if it is a subdirectory, ensuring it belongs to an actual Git repository.
 
         :param root_dir: The root directory or subdirectory intended for Git repository initialization.
         :type root_dir: Path
 
-        :raises git.exc.InvalidGitRepositoryError: If the specified directory or its parent directories
-            do not contain a valid Git repository.
-        :raises typer.Exit: Exits the program if the directory is not part of a valid Git repository.
+        :raises NotAGitRepository: If the specified directory or its parent directories do not
+            contain a valid Git repository.
         """
         try:
             # Initialize repo object, searching upwards from root_dir if it's a subdirectory
             self.repo = git.Repo(str(root_dir), search_parent_directories=True)
 
         except git.exc.InvalidGitRepositoryError:
-            print("[bold red]Not a git repository or git is not found in PATH[/bold red].")
-            raise typer.Exit()
+            raise NotAGitRepository(
+                f"'{root_dir}' is not a git repository, or git is not found in PATH.",
+                hint=(
+                    "Run 'git init' in the source directory, or point --src-dir at a repository."
+                    " Check that git is installed and on your PATH."
+                ),
+                details={"src_dir": str(root_dir)},
+            )
 
     def get_git_tracked_files(self, src_dirs: List[str]) -> List[Path]:
         """

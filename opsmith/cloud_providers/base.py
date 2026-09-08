@@ -119,18 +119,6 @@ class CloudProviderRegistry:
                 )
 
 
-class CloudCredentialsError(Exception):
-    """Custom exception for cloud credential errors."""
-
-    def __init__(self, message: str, help_url: str):
-        self.message = message
-        self.help_url = help_url
-        super().__init__(
-            f"{self.message}\nPlease ensure your credentials are set up correctly. For more"
-            f" information, visit: {self.help_url}"
-        )
-
-
 class BaseCloudProvider(abc.ABC):
     """Abstract base class for cloud providers."""
 

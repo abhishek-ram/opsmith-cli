@@ -15,7 +15,7 @@ from rich import print
 from rich.markup import escape
 
 from opsmith.agent import AgentDeps
-from opsmith.exceptions import OpsmithException
+from opsmith.core.errors import OpsmithError
 from opsmith.prompts import (
     DOCKERFILE_GENERATION_PROMPT_TEMPLATE,
     DOCKERFILE_VALIDATION_PROMPT_TEMPLATE,
@@ -229,7 +229,7 @@ class ServiceDetector:
             ]
             editor_answers = inquirer.prompt(editor_questions)
             if not editor_answers:
-                raise OpsmithException("Dockerfile generation aborted by user.")
+                raise OpsmithError("Dockerfile generation aborted by user.")
             dockerfile_content = editor_answers["dockerfile"]
 
             completed, reason, _ = self._validate_dockerfile(dockerfile_content)

@@ -16,8 +16,8 @@ from pydantic_ai.messages import ModelMessage
 from rich import print
 
 from opsmith.cloud_providers.base import BaseCloudProvider, MachineType, MachineTypeList
+from opsmith.core.errors import LlmGaveUp, OpsmithError, UnknownEnvironment
 from opsmith.deployment_strategies.base import BaseDeploymentStrategy
-from opsmith.exceptions import MonolithicDeploymentError, OpsmithException
 from opsmith.infra_provisioners.ansible_provisioner import AnsibleProvisioner
 from opsmith.infra_provisioners.terraform_provisioner import TerraformProvisioner
 from opsmith.prompts import (
@@ -360,7 +360,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                 ]
                 editor_answers = inquirer.prompt(editor_questions)
                 if not editor_answers:
-                    raise OpsmithException("Docker compose generation aborted by user.")
+                    raise OpsmithError("Docker compose generation aborted by user.")
                 docker_compose_content.content = editor_answers["docker_compose_file"]
 
                 is_successful, reason, _, docker_compose_content.env_file_content = (
@@ -670,7 +670,10 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         choices, recommended_instance = suggested_machine_types.as_options()
 
         if not choices:
-            raise MonolithicDeploymentError("No suitable instance types found.")
+            raise LlmGaveUp(
+                "No suitable instance types found.",
+                hint="The model returned no machine type matching the detected services.",
+            )
 
         questions = [
             inquirer.List(
@@ -714,7 +717,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         answers = inquirer.prompt(confirm_question)
         if not answers or not answers.get("dns_configured"):
             print("[bold red]DNS configuration not confirmed. Aborting deployment.[/bold red]")
-            raise MonolithicDeploymentError("User did not confirm DNS configuration.")
+            raise OpsmithError("User did not confirm DNS configuration.")
 
     def _deploy_frontend_service(
         self,
@@ -1141,8 +1144,9 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         env_state = MonolithicDeploymentState.load(env_state_path)
 
         if not env_state.virtual_machine:
-            raise MonolithicDeploymentError(
-                "Virtual machine is not provisioned for this environment."
+            raise UnknownEnvironment(
+                "Virtual machine is not provisioned for this environment.",
+                hint="Run 'opsmith deploy' for this environment first.",
             )
 
         ansible_user = env_state.virtual_machine.user
@@ -1191,8 +1195,10 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                 "[bold red]No deployment found for this environment. Please run 'deploy'"
                 " first.[/bold red]"
             )
-            raise MonolithicDeploymentError(
-                f"No state file found at {env_state_path}. Run 'deploy' first."
+            raise UnknownEnvironment(
+                f"No state file found at {env_state_path}. Run 'deploy' first.",
+                hint="Run 'opsmith deploy' for this environment first.",
+                details={"path": str(env_state_path)},
             )
 
         env_state = MonolithicDeploymentState.load(env_state_path)
