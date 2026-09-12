@@ -46,8 +46,8 @@ terraform version the check parses is recorded on the context for phase 3.
 
 | Module | Holds |
 |--------|-------|
-| `cli/` | Everything that knows about a terminal: `app.py` (Typer assembly, global options, the error handler), `output.py` (renderers), `state.py` (`CliState`), `commands/` (one per command, plus the `@requires` declaration in its `__init__.py`) |
-| `core/` | Orchestration that never touches a terminal: `errors.py`, `events.py`, `context.py`, `provisioners.py`, `llm.py`, `config.py` |
+| `cli/` | Everything that knows about a terminal: `app.py` (Typer assembly, global options, the error handler), `output.py` (renderers), `interaction.py` (`TerminalInteraction`), `state.py` (`CliState`), `commands/` (one per command, plus the `@requires` declaration in its `__init__.py`) |
+| `core/` | Orchestration that never touches a terminal: `errors.py`, `events.py`, `interaction.py`, `context.py`, `provisioners.py`, `llm.py`, `config.py` |
 | `cloud_providers/` | AWS and GCP, plus the registry third parties plug into |
 | `deployment_strategies/` | `base.py` holds the shared steps, `monolithic.py` composes them |
 | `infra_provisioners/` | Terraform and Ansible wrappers; the only code that shells out |
@@ -61,8 +61,8 @@ terraform version the check parses is recorded on the context for phase 3.
 ### The UI boundary is the organising rule
 
 Only `opsmith/cli/` may import `inquirer`, `typer`, `click`, `rich.print`, `rich.console`,
-`rich.status` or `rich.prompt`. `opsmith/tests/test_boundaries.py` enforces this with an allowlist
-of modules not yet converted, and **the allowlist may only shrink** — a stale entry fails the test.
+`rich.status` or `rich.prompt`. `opsmith/tests/test_boundaries.py` enforces it. Its allowlist of
+modules not yet converted is **empty** as of part `0d`: an entry there is now a regression.
 
 Everything else follows from that rule:
 
@@ -71,6 +71,13 @@ Everything else follows from that rule:
   markup; `opsmith/cli/output.py` decides how it looks. `TextRenderer` styles by event kind and
   turns a `waiting` pair into a rich spinner; `JsonRenderer` streams NDJSON to stderr so stdout
   carries exactly one envelope.
+- **Questions are keyed interactions, not prompts.** Core code calls
+  `ctx.interact.ask/select/confirm/edit/wait_for/notify(...)`, inline, wherever an answer is
+  needed. Every call carries a stable key from the table in the migration plan, because only a
+  question that can be named can be answered by a flag, a file or an agent;
+  `opsmith/tests/test_interaction_keys.py` walks the package and fails on a key the table does not
+  declare. `opsmith/cli/interaction.py` maps the primitives onto `inquirer`; a cancelled prompt is
+  `InteractionCancelled` (exit 3), never a `None` a call site has to check for.
 - **Validation is `core/config.py`.** Parsing and validating `deployments.yml` returns a list of
   `ConfigIssue`, never a print and never a bool. The `setup` editors and `opsmith config validate`
   call the same functions, so a config written by an agent meets the rules a person editing one
@@ -80,10 +87,13 @@ Everything else follows from that rule:
   the error into an envelope and an exit code. Anything not an `OpsmithError` becomes `INTERNAL`/1.
   Adding an error class means adding its code to `EXIT_CODES` — a test walks the module and fails
   otherwise.
-- **Nothing constructs its own dependencies.** `OpsmithContext` (`opsmith/core/context.py`) carries
-  `src_dir`, `deployments_path`, `events`, `agent`, `provisioner_factory`, `git_repo` (opened
-  lazily) and `verbose`. A strategy, `ServiceDetector` and `RepoMap` each take one and reach for
-  nothing else, so constructing them touches neither the filesystem nor the network.
+- **Nothing constructs its own dependencies.** `OpsmithContext` (`opsmith/core/context.py`)
+  requires `src_dir`, `deployments_path`, `events`, `interact` and `provisioner_factory` — how a run
+  reaches the world, so no run is without them. Only two are optional, and for a reason: `agent`,
+  because a real run has none until the model is resolved after the context is built, and
+  `git_repo`, because it is opened lazily so a command that needs no repository does not fail
+  outside one. A strategy, `ServiceDetector` and `RepoMap` each take a context and reach for nothing
+  else, so constructing them touches neither the filesystem nor the network.
 
 `opsmith/cli/state.py` holds `CliState` — the terminal-only half (renderer, output mode, the
 headless flags) — and nests the `OpsmithContext` that every core call receives.
@@ -145,9 +155,11 @@ anything structural.
 - `docs/reference/` — how the system works today. Written in the present tense, maintained.
 
 A spec is written before the work and stops changing once it ships; do not amend one to match what
-was built. Parts `0a` (CLI split and errors), `0b` (context, events, provisioner injection) and
-`0c` (model configuration, tool checks, the `config` commands) have landed. `0d` empties the boundary allowlist by moving the remaining `inquirer` calls behind an
-`Interaction` API — leave prompts where they are until then.
+was built. Parts `0a` (CLI split and errors), `0b` (context, events, provisioner injection),
+`0c` (model configuration, tool checks, the `config` commands) and `0d` (the interaction API and
+its terminal implementation) have landed. `0e` makes the interactions headless — answer sources,
+the answer store, and the exit-3 loop that resumes a run — so `on_headless` on an `edit` and the
+`secret` flag on an `ask` are declared but do nothing yet.
 
 ## Conventions
 

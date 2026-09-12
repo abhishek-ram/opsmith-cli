@@ -70,7 +70,7 @@ def test_callback_builds_the_state_from_the_global_options(cli, runner, tmp_proj
 
 def _run_setup_capturing_the_detector(cli, runner, *extra_args: str):
     """
-    Runs setup far enough to build the detector, then aborts at the first prompt.
+    Runs setup far enough to build the detector, then cancels the first prompt.
 
     :param cli: The Typer app under test.
     :param runner: The CLI runner.
@@ -80,9 +80,8 @@ def _run_setup_capturing_the_detector(cli, runner, *extra_args: str):
     with patch("opsmith.cli.commands.setup.ServiceDetector") as detector_class:
         with patch("opsmith.cli.commands.setup.DeploymentConfig") as config_class:
             config_class.load.return_value = None
-            with patch("opsmith.cli.commands.setup.inquirer") as inquirer_module:
-                # Abort at the application name prompt, before anything calls the model.
-                inquirer_module.prompt.return_value = None
+            with patch("opsmith.cli.interaction.inquirer.prompt", side_effect=KeyboardInterrupt):
+                # Cancel the application name prompt, before anything calls the model.
                 runner.invoke(cli, _base_args(*extra_args, "setup"))
     return detector_class
 

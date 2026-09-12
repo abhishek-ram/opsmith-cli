@@ -116,7 +116,7 @@ Exit codes:
 | 0 | success | |
 | 1 | unexpected failure | `INTERNAL` |
 | 2 | usage or validation error | `INVALID_CONFIG`, `INVALID_ARGUMENT`, `UNKNOWN_ENVIRONMENT`, `UNKNOWN_SERVICE`, `UNKNOWN_RECIPE`, `TEMPLATE_INVALID`, `TEMPLATE_DRIFT`, `CAPACITY_UNSATISFIABLE` |
-| 3 | missing answer in non-interactive mode; run again with the answer to resume | `MISSING_ANSWER` |
+| 3 | the run needs an answer it does not have; run again with the answer to resume | `MISSING_ANSWER`, `INTERACTION_CANCELLED` |
 | 4 | external tool failed (terraform, ansible, docker) | `TERRAFORM_FAILED`, `ANSIBLE_FAILED`, `DOCKER_FAILED`, `DEPLOY_UNHEALTHY` |
 | 5 | cloud credentials or permissions | `CLOUD_CREDENTIALS`, `CLOUD_PERMISSION` |
 | 6 | a model step could not produce a usable result within its limits | `LLM_GAVE_UP` |
@@ -172,7 +172,8 @@ Stable keys used by the interaction API. Flags map onto these, and an answers fi
 | `env.state_backend` | `env create` (phase 3) | `--state cloud\|local` |
 | `envvar.<KEY>` | compose env confirmation | `--env-var KEY=VALUE` |
 | `build_env.<slug>.<KEY>` | frontend build env | `--build-env slug:KEY=VALUE` |
-| `dns.<slug>` | `wait_for` once the records are known | run again after creating the records; `--yes` only where the strategy cannot verify |
+| `dns.confirm` | the DNS confirmation as it stands today, over every record at once | `--yes` |
+| `dns.<slug>` | `wait_for` once the records are known, replacing `dns.confirm` | run again after creating the records; `--yes` only where the strategy cannot verify |
 | `env.action` | interactive `deploy` menu | n/a, use subcommands |
 | `run.service`, `run.command` | `run` | positional |
 | `delete.confirm` | `destroy` | `--yes` |

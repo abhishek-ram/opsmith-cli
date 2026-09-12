@@ -1,6 +1,7 @@
 """Tests for the CLI contract: the error hierarchy, the exit codes and the JSON envelope."""
 
 import json
+from unittest.mock import patch
 
 import pytest
 import rich
@@ -40,7 +41,8 @@ def test_every_error_class_has_an_exit_code():
 def test_exit_codes_match_the_cli_contract():
     """
     Asserts the code-to-exit-code map is exactly the table in the migration plan, for the
-    codes this part declares. Codes 3 and 8 arrive with headless mode in part 0e.
+    codes this part declares. MISSING_ANSWER, which shares exit code 3, and PENDING_ACTION
+    arrive with headless mode in part 0e.
     """
     assert EXIT_CODES == {
         "INTERNAL": 1,
@@ -48,6 +50,7 @@ def test_exit_codes_match_the_cli_contract():
         "INVALID_ARGUMENT": 2,
         "UNKNOWN_ENVIRONMENT": 2,
         "UNKNOWN_SERVICE": 2,
+        "INTERACTION_CANCELLED": 3,
         "TERRAFORM_FAILED": 4,
         "ANSIBLE_FAILED": 4,
         "DOCKER_FAILED": 4,
@@ -89,6 +92,11 @@ def probe_app(monkeypatch, tmp_project):
         """A command that raises an error mapped to exit code 6."""
         raise LlmGaveUp("the model produced nothing usable")
 
+    def cancels_a_prompt(ctx: typer.Context):
+        """A command whose user interrupts a question, through the real interaction."""
+        with patch("opsmith.cli.interaction.inquirer.prompt", side_effect=KeyboardInterrupt):
+            ctx.obj.context.interact.ask("app.name", "Enter the application name")
+
     def raises_value_error(ctx: typer.Context):
         """A command that raises an exception opsmith does not anticipate."""
         raise ValueError("something nobody planned for")
@@ -105,6 +113,7 @@ def probe_app(monkeypatch, tmp_project):
         raises_invalid_config,
         raises_cloud_credentials,
         raises_llm_gave_up,
+        cancels_a_prompt,
         raises_value_error,
         exits_non_zero,
     ):
@@ -266,3 +275,16 @@ def test_every_renderer_implements_the_whole_interface():
     """
     for renderer_class in (TextRenderer, JsonRenderer):
         assert not getattr(renderer_class, "__abstractmethods__", set())
+
+
+def test_a_cancelled_prompt_is_reported_as_a_cancellation(runner, probe_app):
+    """
+    Interrupting a question stops the run with INTERACTION_CANCELLED and exit code 3, naming
+    the key that went unanswered, so re-running with that answer is the obvious next move.
+    """
+    result, envelope = _invoke(runner, probe_app, "cancels-a-prompt")
+
+    assert result.exit_code == 3
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "INTERACTION_CANCELLED"
+    assert envelope["error"]["details"]["key"] == "app.name"

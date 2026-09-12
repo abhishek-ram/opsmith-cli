@@ -6,14 +6,12 @@ from collections import defaultdict
 from pathlib import Path
 from typing import List, Optional
 
-import inquirer
 import yaml
 from pydantic import BaseModel, Field
 from pydantic_ai.messages import ModelMessage
 
 from opsmith.agent import AgentDeps
 from opsmith.core.context import OpsmithContext
-from opsmith.core.errors import OpsmithError
 from opsmith.core.events import STEP_BUILD, STEP_DETECT
 from opsmith.prompts import (
     DOCKERFILE_GENERATION_PROMPT_TEMPLATE,
@@ -62,11 +60,12 @@ class ServiceDetector:
 
     def __init__(self, ctx: OpsmithContext):
         """
-        :param ctx: The run's context, supplying the source directory, the model, the event sink
-            and whether the run was asked for verbose output.
+        :param ctx: The run's context, supplying the source directory, the model, the event sink,
+            the way to ask the user something, and whether the run was asked for verbose output.
         """
         self.ctx = ctx
         self.events = ctx.events
+        self.interact = ctx.interact
         self.deployments_path = ctx.deployments_path
         self.agent = ctx.agent
         self.repo_map = RepoMap(ctx=ctx)
@@ -221,17 +220,13 @@ class ServiceDetector:
             messages = response.new_messages() + validation_messages
 
         while not completed:
-            editor_questions = [
-                inquirer.Editor(
-                    "dockerfile",
-                    message="Would you like to manually edit the Dockerfile?",
-                    default=lambda _: dockerfile_content,  # last generated content
-                )
-            ]
-            editor_answers = inquirer.prompt(editor_questions)
-            if not editor_answers:
-                raise OpsmithError("Dockerfile generation aborted by user.")
-            dockerfile_content = editor_answers["dockerfile"]
+            dockerfile_content = self.interact.edit(
+                "dockerfile.edit",
+                "Would you like to manually edit the Dockerfile?",
+                content=dockerfile_content,  # last generated content
+                path=dockerfile_path_abs,
+                on_headless="fail",
+            )
 
             completed, reason, _ = self._validate_dockerfile(dockerfile_content)
             self.events.log(

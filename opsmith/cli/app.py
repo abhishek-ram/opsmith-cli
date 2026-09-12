@@ -19,6 +19,7 @@ import typer
 from opsmith.cli.commands import analyze
 from opsmith.cli.commands import config as config_commands
 from opsmith.cli.commands import deploy, requirements_of, setup
+from opsmith.cli.interaction import TerminalInteraction
 from opsmith.cli.output import (
     BaseRenderer,
     OutputFormat,
@@ -363,6 +364,7 @@ def main(
             deployments_path=resolved_src_dir.joinpath(settings.deployments_dir),
             events=renderer,
             provisioner_factory=ProvisionerFactory(events=renderer),
+            interact=TerminalInteraction(renderer),
             verbose=verbose,
         ),
         output=output,

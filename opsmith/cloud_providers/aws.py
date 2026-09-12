@@ -1,9 +1,8 @@
 import shutil
-from typing import TYPE_CHECKING, Literal, Type
+from typing import TYPE_CHECKING, List, Literal, Type
 
 import boto3
 import botocore.session
-import inquirer
 from botocore.exceptions import ClientError, NoCredentialsError
 from pydantic import Field
 
@@ -14,8 +13,9 @@ from opsmith.cloud_providers.base import (
     MachineType,
     MachineTypeList,
 )
-from opsmith.core.errors import CloudCredentialsError
+from opsmith.core.errors import CloudCredentialsError, OpsmithError
 from opsmith.core.events import STEP_VM, EventSink
+from opsmith.core.interaction import Choice
 
 if TYPE_CHECKING:
     from opsmith.core.context import OpsmithContext
@@ -46,12 +46,12 @@ class AWSProvider(BaseCloudProvider):
         return AWSCloudDetail
 
     @staticmethod
-    def get_regions(events: EventSink) -> list[tuple[str, str]]:
+    def get_regions(events: EventSink) -> List[Choice]:
         """
         Retrieves a list of available AWS regions with their display names.
 
         :param events: Sink to report the wait on the AWS API to.
-        :return: (display name, region code) pairs, sorted by code.
+        :return: One choice per region, labelled with its description, sorted by code.
         """
         with events.waiting(STEP_VM, "Fetching available regions from AWS Cloud Provider..."):
             # Get available region codes from EC2
@@ -68,9 +68,9 @@ class AWSProvider(BaseCloudProvider):
             for code in available_region_codes:
                 data = region_data[code]
                 description = data.get("description", code.replace("-", " ").title())
-                regions.append((f"{description} ({code})", code))
+                regions.append(Choice(label=f"{description} ({code})", value=code))
 
-            return sorted(regions, key=lambda x: x[1])
+            return sorted(regions, key=lambda choice: choice.value)
 
     def get_instance_types(self) -> MachineTypeList:
         """
@@ -167,21 +167,15 @@ class AWSProvider(BaseCloudProvider):
                 )
 
             regions = AWSProvider.get_regions(ctx.events)
-            questions = [
-                inquirer.List(
-                    "region",
-                    message="Select an AWS region",
-                    choices=regions,
-                ),
-            ]
-            answers = inquirer.prompt(questions)
-            if not answers or not answers.get("region"):
-                raise ValueError("AWS region selection is required. Aborting.")
-            selected_region = answers["region"]
+            selected_region = ctx.interact.select("env.region", "Select an AWS region", regions)
 
             return AWSCloudDetail(
                 account_id=account_id, ssm_plugin=ssm_plugin_path, region=selected_region
             )
+        except OpsmithError:
+            # A cancelled prompt, or anything else Opsmith describes for itself, is reported as
+            # what it is. Only the SDK failures below become a credentials error.
+            raise
         except (NoCredentialsError, ClientError) as e:
             raise CloudCredentialsError(
                 message=f"AWS credentials error: {e}",

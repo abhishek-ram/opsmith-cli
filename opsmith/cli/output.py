@@ -168,6 +168,15 @@ class BaseRenderer(EventSink):
         :param logo: The styled banner.
         """
 
+    def stop_waiting(self):
+        """
+        Clears anything animating on the stream, so something else can write to it.
+
+        The interaction implementation calls this before every prompt: a spinner and a prompt
+        drawing on the same terminal at the same time garble each other. Renderers that animate
+        nothing do nothing here.
+        """
+
 
 class TextRenderer(BaseRenderer):
     """Prints what Opsmith printed before the core stopped printing for itself.
@@ -232,6 +241,10 @@ class TextRenderer(BaseRenderer):
         if self._status is not None:
             self._status.stop()
             self._status = None
+
+    def stop_waiting(self):
+        """Clears the spinner so a prompt can have the terminal to itself."""
+        self._stop_waiting()
 
     def render_document(self, text: str):
         """

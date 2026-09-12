@@ -67,6 +67,31 @@ class UnknownService(OpsmithError):
     code: ClassVar[str] = "UNKNOWN_SERVICE"
 
 
+# --- exit code 3: the run needs an answer it does not have --------------------------------
+
+
+class InteractionCancelled(OpsmithError):
+    """A person was asked something and declined to answer.
+
+    It shares its exit code with the missing answer a headless run reports, because it means
+    the same thing to whoever runs the command again: supply the answer and re-run.
+    """
+
+    code: ClassVar[str] = "INTERACTION_CANCELLED"
+
+    def __init__(self, key: str, message: str):
+        """
+        :param key: The interaction key that went unanswered.
+        :param message: The question that was asked, so the report says what was cancelled.
+        """
+        self.key = key
+        super().__init__(
+            message=f"Cancelled at '{key}': {message}",
+            hint="Run the command again and answer the question, or supply the answer up front.",
+            details={"key": key, "question": message},
+        )
+
+
 # --- exit code 4: an external tool failed ------------------------------------------------
 
 
@@ -143,6 +168,7 @@ EXIT_CODES: Dict[str, int] = {
     "INVALID_ARGUMENT": 2,
     "UNKNOWN_ENVIRONMENT": 2,
     "UNKNOWN_SERVICE": 2,
+    "INTERACTION_CANCELLED": 3,
     "TERRAFORM_FAILED": 4,
     "ANSIBLE_FAILED": 4,
     "DOCKER_FAILED": 4,
@@ -153,7 +179,7 @@ EXIT_CODES: Dict[str, int] = {
 }
 """Maps every declared error code to the process exit code the CLI returns for it.
 
-Codes 3 (MISSING_ANSWER) and 8 (PENDING_ACTION) arrive with headless mode in part 0e. Codes
-owned by later phases (UNKNOWN_RECIPE, TEMPLATE_*, CAPACITY_UNSATISFIABLE, STATE_*) are not
-declared yet.
+MISSING_ANSWER, which shares exit code 3 with INTERACTION_CANCELLED, and PENDING_ACTION
+(exit 8) arrive with headless mode in part 0e. Codes owned by later phases (UNKNOWN_RECIPE,
+TEMPLATE_*, CAPACITY_UNSATISFIABLE, STATE_*) are not declared yet.
 """

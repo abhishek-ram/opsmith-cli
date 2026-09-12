@@ -31,7 +31,12 @@ from opsmith.deployment_strategies.monolithic import (
     DockerComposeLogValidation,
     MonolithicDeploymentStrategy,
 )
-from opsmith.tests.conftest import FakeGitRepo, FakeProvisionerFactory, RecordingSink
+from opsmith.tests.conftest import (
+    FakeGitRepo,
+    FakeInteraction,
+    FakeProvisionerFactory,
+    RecordingSink,
+)
 from opsmith.types import (
     DependencyTypeEnum,
     DeploymentConfig,
@@ -102,29 +107,6 @@ def registered_provider():
     """Registers the test provider, the way a provider plugin registers itself."""
     CLOUD_PROVIDER_REGISTRY.register(FakeCloudProvider)
     return FakeCloudProvider
-
-
-def answer_with_defaults(questions):
-    """
-    Answers every prompt with the default the code offered.
-
-    That is what a user pressing enter through the flow would do, and it keeps the strategy on
-    its happy path without the test having to know which prompt comes next.
-
-    :param questions: The inquirer questions the strategy asked.
-    :return: The answers, keyed by question name.
-    """
-    return {question.name: question.default for question in questions}
-
-
-@pytest.fixture(autouse=True)
-def no_prompts():
-    """Answers every inquirer prompt with its default. Part 0d replaces these with the API."""
-    with patch(
-        "opsmith.deployment_strategies.monolithic.inquirer.prompt",
-        side_effect=answer_with_defaults,
-    ) as prompt:
-        yield prompt
 
 
 @pytest.fixture(autouse=True)
@@ -250,7 +232,9 @@ def agent() -> MagicMock:
 
 
 @pytest.fixture
-def ctx(tmp_path: Path, events: RecordingSink, provisioners, agent) -> OpsmithContext:
+def ctx(
+    tmp_path: Path, events: RecordingSink, provisioners, agent, interact: FakeInteraction
+) -> OpsmithContext:
     """A context wired to the fakes, with a Dockerfile already generated for the service."""
     deployments_path = tmp_path / ".opsmith"
     dockerfile = deployments_path / "docker" / SERVICE_SLUG / "Dockerfile"
@@ -263,6 +247,7 @@ def ctx(tmp_path: Path, events: RecordingSink, provisioners, agent) -> OpsmithCo
         events=events,
         agent=agent,
         provisioner_factory=provisioners,
+        interact=interact,
         git_repo=FakeGitRepo(archive_path=tmp_path),
     )
 
@@ -284,6 +269,8 @@ def test_a_strategy_constructs_without_a_repository_on_disk(tmp_path: Path, even
         src_dir=tmp_path / "nowhere",
         deployments_path=tmp_path / "nowhere" / ".opsmith",
         events=events,
+        interact=FakeInteraction(),
+        provisioner_factory=FakeProvisionerFactory(),
         git_repo=FakeGitRepo(),
     )
 
@@ -609,3 +596,27 @@ def test_a_generated_compose_file_that_fails_is_regenerated(
     ]
     assert deploys.count("ansible:run_playbook:docker_compose_deploy") == 2
     assert not verdicts
+
+
+def test_deploy_asks_the_user_through_the_interaction_api(
+    strategy, deployment_config, environment, interact
+):
+    """
+    A deploy asks three things: which machine to run on, whether the DNS records exist, and
+    what each configured environment variable should hold. Each one carries the key a headless
+    run answers it by, and the default the code offered.
+    """
+    strategy.deploy(deployment_config, environment)
+
+    assert [(entry["primitive"], entry["key"]) for entry in interact.asked] == [
+        ("select", "env.instance_type"),
+        ("confirm", "dns.confirm"),
+        ("ask", "envvar.DATABASE_URL"),
+    ]
+
+    machine, dns, env_var = interact.asked
+    assert [choice.value for choice in machine["choices"]] == [SMALL_MACHINE, LARGE_MACHINE]
+    assert dns["details"] == {
+        "records": [{"type": "A", "name": "api.example.test", "value": "203.0.113.10"}]
+    }
+    assert env_var["default"] == "postgres://localhost/app"

@@ -1,7 +1,6 @@
-from typing import TYPE_CHECKING, Literal, Type
+from typing import TYPE_CHECKING, List, Literal, Type
 
 import google.auth
-import inquirer
 from google.auth.credentials import Credentials
 from google.auth.exceptions import DefaultCredentialsError
 from google.cloud import compute_v1
@@ -14,8 +13,9 @@ from opsmith.cloud_providers.base import (
     MachineType,
     MachineTypeList,
 )
-from opsmith.core.errors import CloudCredentialsError
+from opsmith.core.errors import CloudCredentialsError, OpsmithError
 from opsmith.core.events import STEP_VM, EventSink
+from opsmith.core.interaction import Choice
 
 if TYPE_CHECKING:
     from opsmith.core.context import OpsmithContext
@@ -107,16 +107,14 @@ class GCPProvider(BaseCloudProvider):
         return self._credentials
 
     @staticmethod
-    def get_regions(
-        project_id: str, credentials: Credentials, events: EventSink
-    ) -> list[tuple[str, str]]:
+    def get_regions(project_id: str, credentials: Credentials, events: EventSink) -> List[Choice]:
         """
         Retrieves a list of available GCP regions using the GCP API.
 
         :param project_id: The project to list regions for.
         :param credentials: Credentials to call the API with.
         :param events: Sink to report the wait on the GCP API to.
-        :return: (display name, region code) pairs, sorted by code.
+        :return: One choice per region, labelled with its description, sorted by code.
         """
         with events.waiting(STEP_VM, "Fetching available regions from GCP Cloud Provider..."):
             client = compute_v1.RegionsClient(credentials=credentials)
@@ -132,9 +130,9 @@ class GCPProvider(BaseCloudProvider):
                     or region.description
                     or code.replace("-", " ").title()
                 )
-                regions.append((f"{name} ({code})", code))
+                regions.append(Choice(label=f"{name} ({code})", value=code))
 
-            return sorted(regions, key=lambda x: x[1])
+            return sorted(regions, key=lambda choice: choice.value)
 
     @staticmethod
     def get_zones(project_id: str, region_name: str, credentials: Credentials) -> list[str]:
@@ -196,32 +194,12 @@ class GCPProvider(BaseCloudProvider):
         try:
             credentials, _ = google.auth.default()
 
-            questions = [
-                inquirer.Text(
-                    name="project_id",
-                    message="Enter the GCP project you want to use",
-                ),
-            ]
-
-            answers = inquirer.prompt(questions)
-            if not answers or not answers.get("project_id"):
-                raise ValueError("GCP project selection is required. Aborting.")
-
-            selected_project_id = answers["project_id"]
+            selected_project_id = ctx.interact.ask(
+                "env.project_id", "Enter the GCP project you want to use"
+            )
 
             regions = cls.get_regions(selected_project_id, credentials, ctx.events)
-            region_questions = [
-                inquirer.List(
-                    "region",
-                    message="Select a GCP region",
-                    choices=regions,
-                ),
-            ]
-            answers = inquirer.prompt(region_questions)
-            if not answers or not answers.get("region"):
-                raise ValueError("GCP region selection is required. Aborting.")
-
-            selected_region = answers["region"]
+            selected_region = ctx.interact.select("env.region", "Select a GCP region", regions)
 
             zones = cls.get_zones(selected_project_id, selected_region, credentials)
             if not zones:
@@ -234,6 +212,10 @@ class GCPProvider(BaseCloudProvider):
                 project_id=selected_project_id, region=selected_region, zone=selected_zone
             )
 
+        except OpsmithError:
+            # A cancelled prompt, or anything else Opsmith describes for itself, is reported as
+            # what it is. Only the SDK failures below become a credentials error.
+            raise
         except DefaultCredentialsError as e:
             raise CloudCredentialsError(
                 message=f"GCP Application Default Credentials error: {e}",

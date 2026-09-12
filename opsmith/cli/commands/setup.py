@@ -1,8 +1,7 @@
 """The `setup` command: detect services and write the deployment configuration."""
 
-from typing import List
+from typing import Any, Callable, List, Tuple
 
-import inquirer
 import typer
 import yaml
 from rich import print
@@ -10,46 +9,54 @@ from rich import print
 from opsmith.cli.commands import requires
 from opsmith.cli.state import CliState
 from opsmith.core.config import ConfigIssue, parse_infra_deps, parse_service
-from opsmith.core.errors import InvalidConfig
+from opsmith.core.interaction import Choice, Interaction
 from opsmith.service_detector import ServiceDetector
 from opsmith.types import DeploymentConfig
 from opsmith.utils import slugify
 
 
-def _report_issues(heading: str, issues: List[ConfigIssue]):
+def _report_issues(interact: Interaction, heading: str, issues: List[ConfigIssue]):
     """
     Shows the problems found in an edited document, so the editor can be reopened on them.
 
+    :param interact: How the run reaches the user.
     :param heading: What was being edited.
     :param issues: The problems found in it.
     """
     for issue in issues:
         location = f"{issue.path}: " if issue.path else ""
-        print(f"\n[red]>>[/red] {heading}: {location}{issue.message}\n")
+        interact.notify(f"{heading}: {location}{issue.message}", details=issue.model_dump())
 
 
-def _validate_service_config(_, config_yaml: str) -> bool:
+def _review(
+    interact: Interaction,
+    key: str,
+    message: str,
+    heading: str,
+    document: str,
+    parse: Callable[[str], Tuple[Any, List[ConfigIssue]]],
+) -> Any:
     """
-    Validates an edited service, in the ``(answers, value) -> bool`` shape inquirer expects.
+    Hands a proposed document to the user and reopens the editor until it parses.
 
-    :param config_yaml: The YAML the user edited.
-    :return: Whether it is usable, which is what decides if inquirer reopens the editor.
+    The reopening used to be inquirer's, driven by a validator that printed as a side effect.
+    It is a plain loop now, because the same rules have to hold for a run with nobody at the
+    keyboard, and only the caller knows what to do with what comes back.
+
+    :param interact: How the run reaches the user.
+    :param key: The interaction key the edit is addressed by.
+    :param message: What the user is being asked to review.
+    :param heading: How to label a problem found in what they saved.
+    :param document: The proposal, as YAML.
+    :param parse: Turns the edited YAML into the object, or into the issues that stopped it.
+    :return: Whatever ``parse`` produced once it produced something.
     """
-    _, issues = parse_service(config_yaml)
-    _report_issues("Invalid service configuration", issues)
-    return not issues
-
-
-def _validate_infra_deps_config(_, config_yaml: str) -> bool:
-    """
-    Validates the edited dependency list, in the shape inquirer expects.
-
-    :param config_yaml: The YAML the user edited.
-    :return: Whether it is usable, which is what decides if inquirer reopens the editor.
-    """
-    _, issues = parse_infra_deps(config_yaml)
-    _report_issues("Invalid dependency configuration", issues)
-    return not issues
+    while True:
+        document = interact.edit(key, message, content=document, on_headless="accept")
+        parsed, issues = parse(document)
+        if parsed is not None:
+            return parsed
+        _report_issues(interact, heading, issues)
 
 
 @requires("docker", "terraform")
@@ -59,6 +66,7 @@ def setup(ctx: typer.Context):
     Identifies services, their languages, types, and frameworks.
     """
     state: CliState = ctx.obj
+    interact = state.context.interact
     detector = ServiceDetector(ctx=state.context)
     deployment_config = DeploymentConfig.load(state.deployments_path)
     scan_services = False
@@ -66,33 +74,25 @@ def setup(ctx: typer.Context):
     if deployment_config:
         print("\n[bold yellow]Existing deployment configuration found.[/bold yellow]")
 
-        update_actions = ["Re-scan services", "Exit"]
-        questions = [
-            inquirer.List(
-                "action",
-                message="What would you like to do?",
-                choices=update_actions,
-                default="Exit",
-            )
+        update_actions = [
+            Choice(label="Re-scan services", value="rescan"),
+            Choice(label="Exit", value="exit"),
         ]
-        answers = inquirer.prompt(questions)
-        if not answers or answers.get("action") == "Exit":
+        action = interact.select(
+            "setup.action", "What would you like to do?", update_actions, default="exit"
+        )
+        if action == "exit":
             print("Exiting setup.")
             return
 
-        if answers.get("action") == "Re-scan services":
-            scan_services = True
+        scan_services = True
 
     else:
         print("No existing deployment configuration found. Starting analysis...\n")
-        app_name_questions = [
-            inquirer.Text("app_name", message="Enter the application name"),
-        ]
-        app_name_answers = inquirer.prompt(app_name_questions)
-        if not app_name_answers or not app_name_answers.get("app_name"):
+        app_name = interact.ask("app.name", "Enter the application name")
+        if not app_name:
             print("[bold red]Application name is required. Aborting.[/bold red]")
             raise typer.Exit(code=1)
-        app_name = app_name_answers["app_name"]
 
         deployment_config = DeploymentConfig(
             app_name=app_name,
@@ -116,21 +116,14 @@ def setup(ctx: typer.Context):
             editor_prompt_message = (
                 f"Review and confirm Service {i + 1}/{len(service_list_obj.services)}"
             )
-            questions = [
-                inquirer.Editor(
-                    "config",
-                    message=editor_prompt_message,
-                    default=service_yaml,
-                    validate=_validate_service_config,
-                )
-            ]
-            answers = inquirer.prompt(questions)
-            confirmed_service, issues = parse_service(answers["config"])
-            if confirmed_service is None:
-                raise InvalidConfig(
-                    "The edited service configuration is not usable.",
-                    details={"errors": [issue.model_dump() for issue in issues]},
-                )
+            confirmed_service = _review(
+                interact,
+                f"service.{service.name_slug}.confirm",
+                editor_prompt_message,
+                "Invalid service configuration",
+                service_yaml,
+                parse_service,
+            )
             confirmed_services.append(confirmed_service)
 
             print("\n[bold blue]Generating Dockerfile for the updated service...[/bold blue]")
@@ -146,22 +139,14 @@ def setup(ctx: typer.Context):
                 "Review and confirm dependencies.\nIf 'provider' is 'user_choice', please replace"
                 " it with a valid provider.\nEach provider can only be listed once."
             )
-            questions = [
-                inquirer.Editor(
-                    "config",
-                    message=editor_prompt_message,
-                    default=deps_yaml,
-                    validate=_validate_infra_deps_config,
-                )
-            ]
-            answers = inquirer.prompt(questions)
-            confirmed_deps, issues = parse_infra_deps(answers["config"])
-            if confirmed_deps is None:
-                raise InvalidConfig(
-                    "The edited dependency configuration is not usable.",
-                    details={"errors": [issue.model_dump() for issue in issues]},
-                )
-            deployment_config.infra_deps = confirmed_deps
+            deployment_config.infra_deps = _review(
+                interact,
+                "infra_deps.confirm",
+                editor_prompt_message,
+                "Invalid dependency configuration",
+                deps_yaml,
+                parse_infra_deps,
+            )
 
     # Create/Update and Save Configuration
     config_path = deployment_config.save(state.deployments_path)

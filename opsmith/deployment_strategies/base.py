@@ -6,7 +6,7 @@ import platform
 import time
 from importlib.metadata import entry_points
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Type
+from typing import Dict, List, Optional, Type
 
 from opsmith.agent import AgentDeps
 from opsmith.cloud_providers.base import BaseCloudProvider, MachineType
@@ -19,6 +19,7 @@ from opsmith.core.events import (
     STEP_VM,
     BufferingSink,
 )
+from opsmith.core.interaction import Choice
 from opsmith.types import (
     DeploymentConfig,
     DeploymentEnvironment,
@@ -88,13 +89,16 @@ class DeploymentStrategyRegistry:
         return self._strategies[strategy_name]
 
     @property
-    def choices(self) -> List[Tuple[str, str]]:
-        """Returns a list of (display text, value) tuples for use in prompts."""
-        choices_list = []
-        for name, strategy_class in sorted(self._strategies.items()):
-            display_text = f"{name} - {strategy_class.description()}"
-            choices_list.append((display_text, name))
-        return choices_list
+    def choices(self) -> List[Choice]:
+        """
+        Describes the registered strategies as options a person can be asked to pick from.
+
+        :return: One choice per strategy, by name.
+        """
+        return [
+            Choice(label=f"{name} - {strategy_class.description()}", value=name)
+            for name, strategy_class in sorted(self._strategies.items())
+        ]
 
 
 class BaseDeploymentStrategy(abc.ABC):
@@ -120,6 +124,7 @@ class BaseDeploymentStrategy(abc.ABC):
         self.ctx = ctx
         self.events = ctx.events
         self.provisioners = ctx.provisioner_factory
+        self.interact = ctx.interact
         self.agent = ctx.agent
         self.agent_deps = AgentDeps(src_dir=ctx.src_dir)
         self.src_dir = ctx.src_dir

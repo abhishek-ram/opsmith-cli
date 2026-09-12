@@ -4,7 +4,8 @@ from unittest.mock import MagicMock, patch
 
 from opsmith.core.context import OpsmithContext
 from opsmith.core.events import NullSink
-from opsmith.service_detector import ServiceDetector
+from opsmith.service_detector import DockerfileContent, ServiceDetector
+from opsmith.tests.conftest import FakeInteraction, FakeProvisionerFactory
 from opsmith.types import ServiceInfo, ServiceList, ServiceTypeEnum
 
 
@@ -13,13 +14,15 @@ def build_context(agent: MagicMock) -> OpsmithContext:
     Builds a context around a mock model, for a detector that never reaches the filesystem.
 
     :param agent: The mock the detector will call instead of a real model.
-    :return: A context with a discarding event sink.
+    :return: A context with a discarding event sink, a fake user and fake provisioners.
     """
     src_dir = Path("/fake/dir")
     return OpsmithContext(
         src_dir=src_dir,
         deployments_path=src_dir / ".opsmith",
         events=NullSink(),
+        interact=FakeInteraction(),
+        provisioner_factory=FakeProvisionerFactory(),
         agent=agent,
     )
 
@@ -150,3 +153,45 @@ class TestServiceDetector(unittest.TestCase):
         self.assertEqual(result.services[0].name_slug, "python_backend_api_1")
         self.assertEqual(result.services[1].name_slug, "python_backend_api_2")
         self.assertEqual(result.services[2].name_slug, "javascript_frontend_1")
+
+
+def test_the_dockerfile_editor_is_a_fix_editor(tmp_path):
+    """
+    When the model gives up, the last attempt is handed to the user to fix by hand and then
+    validated again. The editor is declared a fix editor, because accepting a Dockerfile that
+    does not build unchanged would only fail the same way later.
+    """
+    response = MagicMock()
+    response.output = DockerfileContent(content="FROM broken\n", give_up=True, reason="stuck")
+    response.new_messages.return_value = []
+    agent = MagicMock()
+    agent.run_sync.return_value = response
+
+    ctx = build_context(agent)
+    ctx.interact = FakeInteraction({"dockerfile.edit": "FROM python:3.13\n"})
+
+    with patch("opsmith.service_detector.RepoMap"):
+        detector = ServiceDetector(ctx=ctx)
+
+    dockerfile_path = tmp_path / "Dockerfile"
+    with patch.object(detector, "_validate_dockerfile", side_effect=[(True, "built", None)]):
+        content = detector._generate_and_validate_dockerfile(
+            service=ServiceInfo(
+                name_slug="api",
+                language="python",
+                service_type=ServiceTypeEnum.BACKEND_API,
+                service_port=8000,
+            ),
+            dockerfile_path_abs=dockerfile_path,
+        )
+
+    assert content == "FROM python:3.13\n"
+    assert ctx.interact.asked == [
+        {
+            "primitive": "edit",
+            "key": "dockerfile.edit",
+            "message": "Would you like to manually edit the Dockerfile?",
+            "path": dockerfile_path,
+            "on_headless": "fail",
+        }
+    ]

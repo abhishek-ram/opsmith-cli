@@ -1,11 +1,12 @@
 import abc
 from enum import Enum
 from importlib.metadata import entry_points
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Type
+from typing import TYPE_CHECKING, Dict, List, Optional, Type
 
 from pydantic import BaseModel, Field, TypeAdapter
 
 from opsmith.core.events import STEP_REGISTRY, BufferingSink
+from opsmith.core.interaction import Choice
 
 if TYPE_CHECKING:
     from opsmith.core.context import OpsmithContext
@@ -35,28 +36,29 @@ class MachineTypeList(BaseModel):
 
     machines: List[MachineType]
 
-    def as_options(self) -> Tuple[List[Tuple[str, "MachineType"]], Optional["MachineType"]]:
+    def as_options(self) -> List[Choice]:
         """
-        Formats the machine list into options for inquirer.
-        It returns a list of choices for inquirer and the recommended machine.
-        """
-        choices = []
-        recommended_machine_choice = None
+        Describes the machines as options a person can be asked to pick from.
 
+        How a recommendation is shown is the asker's business, so it is marked on the choice
+        rather than written into the label.
+
+        :return: One choice per machine, cheapest first.
+        """
         # sort machines by cpu and ram to have a consistent order for user
         sorted_machines = sorted(self.machines, key=lambda m: (m.cpu, m.ram_gb))
 
-        for option in sorted_machines:
-            choice_text = (
-                f"{option.name} ({option.cpu} vCPUs, {option.ram_gb} GB RAM,"
-                f" {option.architecture.value})"
+        return [
+            Choice(
+                label=(
+                    f"{machine.name} ({machine.cpu} vCPUs, {machine.ram_gb} GB RAM,"
+                    f" {machine.architecture.value})"
+                ),
+                value=machine,
+                recommended=machine.is_recommended,
             )
-            if option.is_recommended:
-                choice_text += " (Recommended)"
-                recommended_machine_choice = option
-            choices.append((choice_text, option))
-
-        return choices, recommended_machine_choice
+            for machine in sorted_machines
+        ]
 
 
 class BaseCloudProviderDetail(BaseModel):
@@ -95,13 +97,16 @@ class CloudProviderRegistry:
         return self._providers[provider_name]
 
     @property
-    def choices(self) -> List[Tuple[str, str]]:
-        """Returns a list of (display text, value) tuples for use in prompts."""
-        choices_list = []
-        for name, provider_class in sorted(self._providers.items()):
-            display_text = f"{name} - {provider_class.description()}"
-            choices_list.append((display_text, name))
-        return choices_list
+    def choices(self) -> List[Choice]:
+        """
+        Describes the registered providers as options a person can be asked to pick from.
+
+        :return: One choice per provider, by name.
+        """
+        return [
+            Choice(label=f"{name} - {provider_class.description()}", value=name)
+            for name, provider_class in sorted(self._providers.items())
+        ]
 
     def _load_builtin_providers(self):
         """Load built-in strategies"""

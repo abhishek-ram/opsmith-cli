@@ -6,7 +6,6 @@ from io import StringIO
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import inquirer
 import jinja2
 import yaml
 from dotenv import dotenv_values
@@ -118,27 +117,20 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
 
         configured_env = deployment_config.get_configured_env_vars()
 
-        # Prepare questions for inquirer
-        questions = []
+        self.events.step(
+            STEP_COMPOSE, "Please confirm or provide values for environment variables:"
+        )
+
+        answers = {}
         for key, value in sorted(env_file_vars.items()):
             # Exclude any custom env that is not configured
             if key not in configured_env:
                 continue
             # Precedence: llm > code default
             default_value = value or configured_env[key]
-            questions.append(
-                inquirer.Text(
-                    name=key,
-                    message=f"Enter value for {key}",
-                    default=default_value,
-                )
+            answers[key] = self.interact.ask(
+                f"envvar.{key}", f"Enter value for {key}", default=default_value
             )
-
-        # Prompt user
-        self.events.step(
-            STEP_COMPOSE, "Please confirm or provide values for environment variables:"
-        )
-        answers = inquirer.prompt(questions)
 
         # For the .env file, merge with precedence: user answers > llm
         final_env_vars_for_file = {**env_file_vars, **answers}
@@ -376,18 +368,16 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                 ),
             )
 
+            _, docker_compose_path = self._get_deploy_docker_compose_path(environment)
+
             while not is_successful:
-                editor_questions = [
-                    inquirer.Editor(
-                        "docker_compose_file",
-                        message="Would you like to manually edit the Docker Compose file?",
-                        default=lambda _: docker_compose_content.content,  # last generated content
-                    )
-                ]
-                editor_answers = inquirer.prompt(editor_questions)
-                if not editor_answers:
-                    raise OpsmithError("Docker compose generation aborted by user.")
-                docker_compose_content.content = editor_answers["docker_compose_file"]
+                docker_compose_content.content = self.interact.edit(
+                    "compose.edit",
+                    "Would you like to manually edit the Docker Compose file?",
+                    content=docker_compose_content.content,  # last generated content
+                    path=docker_compose_path,
+                    on_headless="fail",
+                )
 
                 is_successful, reason, _, docker_compose_content.env_file_content = (
                     self._deploy_validate_docker_compose(
@@ -527,21 +517,16 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             default_val = service_vars.get(env_var.key, env_var.default_value)
 
             if env_var.is_secret:
-                question = inquirer.Password(
-                    env_var.key,
-                    message=f"  Enter value for secret '{env_var.key}'",
-                    default=default_val,
-                )
+                message = f"  Enter value for secret '{env_var.key}'"
             else:
-                question = inquirer.Text(
-                    env_var.key,
-                    message=f"  Enter value for '{env_var.key}'",
-                    default=default_val,
-                )
+                message = f"  Enter value for '{env_var.key}'"
 
-            answers = inquirer.prompt([question])
-            if answers and answers.get(env_var.key) is not None:
-                service_vars[env_var.key] = answers[env_var.key]
+            service_vars[env_var.key] = self.interact.ask(
+                f"build_env.{service.name_slug}.{env_var.key}",
+                message,
+                default=default_val,
+                secret=env_var.is_secret,
+            )
 
         return service_vars
 
@@ -699,7 +684,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             )
 
         suggested_machine_types = response.output
-        choices, recommended_instance = suggested_machine_types.as_options()
+        choices = suggested_machine_types.as_options()
 
         if not choices:
             raise LlmGaveUp(
@@ -707,16 +692,9 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                 hint="The model returned no machine type matching the detected services.",
             )
 
-        questions = [
-            inquirer.List(
-                "instance_type",
-                message="Select an instance type for the new environment",
-                choices=choices,
-                default=recommended_instance,
-            )
-        ]
-        answers = inquirer.prompt(questions)
-        return answers["instance_type"]
+        return self.interact.select(
+            "env.instance_type", "Select an instance type for the new environment", choices
+        )
 
     def _confirm_dns_records(
         self,
@@ -744,18 +722,16 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             lines.append("----------------------------------------")
             self.events.log(STEP_DNS, "\n".join(lines), record=record)
 
-        confirm_question = [
-            inquirer.Confirm(
-                "dns_configured",
-                message=(
-                    "Have you configured the DNS records as shown above? (This might take"
-                    " a few minutes to propagate)"
-                ),
-                default=True,
-            )
-        ]
-        answers = inquirer.prompt(confirm_question)
-        if not answers or not answers.get("dns_configured"):
+        configured = self.interact.confirm(
+            "dns.confirm",
+            (
+                "Have you configured the DNS records as shown above? (This might take"
+                " a few minutes to propagate)"
+            ),
+            details={"records": dns_records},
+            default=True,
+        )
+        if not configured:
             raise OpsmithError(
                 "DNS configuration was not confirmed, so the deployment cannot continue.",
                 hint="Create the records shown above, then run the command again.",
@@ -1298,15 +1274,13 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                 STEP_SETUP,
                 "Infrastructure changes detected. Existing data in affected services may be lost.",
             )
-            confirm_questions = [
-                inquirer.Confirm(
-                    "continue",
-                    message="Do you want to continue with the update?",
-                    default=False,
-                )
-            ]
-            confirm_answers = inquirer.prompt(confirm_questions)
-            if not confirm_answers or not confirm_answers.get("continue"):
+            proceed = self.interact.confirm(
+                "update.confirm_infra_changes",
+                "Do you want to continue with the update?",
+                details=changes,
+                default=False,
+            )
+            if not proceed:
                 self.events.warning(STEP_SETUP, "Update cancelled by user.")
                 return
 

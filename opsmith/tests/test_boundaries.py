@@ -1,9 +1,9 @@
 """The UI boundary rule: only `opsmith/cli/` may import a terminal library.
 
 Core modules talk to a person through the interaction API and report progress through the
-event sink; they never import a prompt or a printer. The rule lands with an allowlist of the
-modules that still violate it, and each later part of phase 0 deletes its own entries. The
-list can only shrink: a module that no longer violates the rule must be removed from it.
+event sink; they never import a prompt or a printer. The rule landed with an allowlist of the
+modules that still violated it, and each part of phase 0 deleted its own entries. The list is
+empty now, so the rule holds everywhere and can only be broken by adding to it.
 """
 
 import ast
@@ -24,13 +24,9 @@ BANNED_RICH_NAMES: Set[str] = {"print"}
 #: Directories inside the package that the rule does not apply to.
 EXEMPT_DIRECTORIES: Set[str] = {"cli", "tests"}
 
-#: Modules that still import a terminal library, with the part of phase 0 that removes them.
-ALLOWED_UI_IMPORTS: Dict[str, Set[str]] = {
-    "cloud_providers/aws.py": {"inquirer"},  # 0d
-    "cloud_providers/gcp.py": {"inquirer"},  # 0d
-    "deployment_strategies/monolithic.py": {"inquirer"},  # 0d
-    "service_detector.py": {"inquirer"},  # 0d
-}
+#: Modules that still import a terminal library. Emptied by part 0d, when the last prompts moved
+#: behind the interaction API; an entry here now would be a regression, not a to-do.
+ALLOWED_UI_IMPORTS: Dict[str, Set[str]] = {}
 
 
 def _ui_imports(module_path: Path) -> Set[str]:

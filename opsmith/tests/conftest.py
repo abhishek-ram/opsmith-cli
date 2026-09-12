@@ -1,8 +1,9 @@
 """Shared fixtures for the Opsmith test suite.
 
-The fakes here stand in for the three things that make a run touch the world: the event sink, the
-git repository, and the terraform and ansible provisioners. With all three replaced a deployment
-strategy runs end to end in a test and every variable it would have applied can be asserted.
+The fakes here stand in for the four things that make a run touch the world: the event sink, the
+person at the keyboard, the git repository, and the terraform and ansible provisioners. With all
+of them replaced a deployment strategy runs end to end in a test and every variable it would have
+applied can be asserted.
 """
 
 from contextlib import contextmanager
@@ -16,6 +17,7 @@ import rich
 from typer.testing import CliRunner
 
 from opsmith.core.context import OpsmithContext
+from opsmith.core.errors import InteractionCancelled
 from opsmith.core.events import Event, EventSink
 
 
@@ -78,6 +80,99 @@ class RecordingSink(EventSink):
         :return: The messages, in the order they were emitted.
         """
         return [e.message for e in self.events if kind is None or e.kind == kind]
+
+
+class FakeInteraction:
+    """Answers questions from a script, and records what was asked.
+
+    Answers are scripted by interaction key. A question with no scripted answer is answered with
+    the default the code offered, which is what a user pressing enter through the flow would do,
+    so a test only has to name the answers it actually cares about.
+
+    It refuses a scripted answer the real prompt would have refused - one that fails the
+    question's own validator, or that is not among the offered choices - because a fake that is
+    more permissive than the terminal hides the bug it was meant to catch.
+    """
+
+    def __init__(self, answers: Optional[Dict[str, Any]] = None):
+        """
+        :param answers: What to answer, by interaction key.
+        """
+        self.answers: Dict[str, Any] = dict(answers or {})
+        self.asked: List[Dict[str, Any]] = []
+        self.notices: List[str] = []
+
+    def _record(self, primitive: str, key: str, message: str, **fields) -> Dict[str, Any]:
+        """
+        Keeps one question, in the order it was asked.
+
+        :param primitive: Which of the five was called.
+        :param key: The interaction key.
+        :param message: The question as it was worded.
+        :param fields: Whatever else that primitive carried.
+        :return: The recorded entry.
+        """
+        entry = {"primitive": primitive, "key": key, "message": message, **fields}
+        self.asked.append(entry)
+        return entry
+
+    def _answer(self, key: str, fallback: Any) -> Any:
+        """
+        :param key: The interaction key being answered.
+        :param fallback: What to answer when the test did not script this key.
+        :return: The answer.
+        """
+        return self.answers[key] if key in self.answers else fallback
+
+    def ask(self, key, message, *, default=None, secret=False, validate=None):
+        """Answers a typed value, refusing one its own validator would reject."""
+        self._record("ask", key, message, default=default, secret=secret)
+        answer = self._answer(key, default)
+        if validate is not None and answer is not None:
+            problem = validate(answer)
+            assert problem is None, f"the answer scripted for '{key}' is not valid: {problem}"
+        return answer
+
+    def select(self, key, message, choices, *, default=None):
+        """Answers with one of the offered values, defaulting to the recommended choice."""
+        self._record("select", key, message, default=default, choices=list(choices))
+
+        fallback = default
+        if fallback is None:
+            recommended = [choice for choice in choices if choice.recommended]
+            fallback = recommended[0].value if recommended else choices[0].value
+
+        answer = self._answer(key, fallback)
+        values = [choice.value for choice in choices]
+        assert answer in values, f"the answer scripted for '{key}' is not one of the choices"
+        return answer
+
+    def confirm(self, key, message, *, details=None, default=False):
+        """Answers yes or no, defaulting to what the code offered."""
+        self._record("confirm", key, message, default=default, details=details)
+        return self._answer(key, default)
+
+    def edit(self, key, message, *, content, path=None, on_headless):
+        """Returns the scripted document, or the proposal unchanged."""
+        self._record("edit", key, message, path=path, on_headless=on_headless)
+        return self._answer(key, content)
+
+    def wait_for(self, key, message, *, check, details=None, timeout_s=None):
+        """
+        Returns once the check passes, or once the test says the wait was satisfied.
+
+        :raises InteractionCancelled: The check fails and nothing said to carry on, which is
+            what a person who gave up waiting would cause.
+        """
+        self._record("wait_for", key, message, details=details)
+        if check():
+            return
+        if not self._answer(key, False):
+            raise InteractionCancelled(key, message)
+
+    def notify(self, message, *, details=None):
+        """Keeps what the run told the user."""
+        self.notices.append(message)
 
 
 class FakeGitRepo:
@@ -315,13 +410,21 @@ def events() -> RecordingSink:
 
 
 @pytest.fixture
+def interact() -> FakeInteraction:
+    """A stand-in for the person at the keyboard, answering with the code's own defaults."""
+    return FakeInteraction()
+
+
+@pytest.fixture
 def provisioners() -> FakeProvisionerFactory:
     """A provisioner factory that records instead of shelling out."""
     return FakeProvisionerFactory()
 
 
 @pytest.fixture
-def opsmith_context(tmp_path: Path, events: RecordingSink, provisioners) -> OpsmithContext:
+def opsmith_context(
+    tmp_path: Path, events: RecordingSink, provisioners, interact: FakeInteraction
+) -> OpsmithContext:
     """
     A context wired entirely to fakes, for testing core code with nothing on disk.
 
@@ -336,5 +439,6 @@ def opsmith_context(tmp_path: Path, events: RecordingSink, provisioners) -> Opsm
         events=events,
         agent=MagicMock(),
         provisioner_factory=provisioners,
+        interact=interact,
         git_repo=FakeGitRepo(archive_path=tmp_path),
     )

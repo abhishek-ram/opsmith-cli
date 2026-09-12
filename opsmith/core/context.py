@@ -12,6 +12,7 @@ from typing import Any, Optional
 from pydantic_ai import Agent
 
 from opsmith.core.events import EventSink
+from opsmith.core.interaction import Interaction
 from opsmith.core.provisioners import ProvisionerFactory
 from opsmith.git_repo import GitRepo
 
@@ -28,17 +29,25 @@ class OpsmithContext:
         src_dir: Path,
         deployments_path: Path,
         events: EventSink,
+        interact: Interaction,
+        provisioner_factory: ProvisionerFactory,
         agent: Optional[Agent] = None,
-        provisioner_factory: Optional[ProvisionerFactory] = None,
         git_repo: Optional[GitRepo] = None,
         verbose: bool = False,
     ):
         """
+        The first five are how a run reaches the world, so every run has them: a context without
+        one is not a state the CLI can be in, and defaulting one to None only turns a missing
+        dependency into an AttributeError at the moment it is finally used.
+
         :param src_dir: The repository the run operates on.
         :param deployments_path: The ``.opsmith`` directory inside it.
         :param events: Where progress is reported.
-        :param agent: The configured model. Absent only in tests that never call one.
+        :param interact: How the run asks a person something.
         :param provisioner_factory: Where terraform and ansible provisioners come from.
+        :param agent: The configured model. Optional because a real run has none until the model
+            is resolved, which happens after the context is built so that ``--help`` does not
+            demand the configuration it is explaining.
         :param git_repo: An already-built repository handle. Left out in normal use, where it is
             opened lazily; supplied by tests that have no repository on disk.
         :param verbose: Whether the run was asked for detailed output.
@@ -46,8 +55,9 @@ class OpsmithContext:
         self.src_dir = src_dir
         self.deployments_path = deployments_path
         self.events = events
-        self.agent = agent
+        self.interact = interact
         self.provisioner_factory = provisioner_factory
+        self.agent = agent
         self.verbose = verbose
         self._git_repo = git_repo
 
@@ -55,9 +65,8 @@ class OpsmithContext:
         # step can read the version without probing again.
         self.terraform_version: Optional[str] = None
 
-        # Filled in by later parts of phase 0. Declared here so those parts only have to assign
-        # them, and so a strategy can check for one without knowing which part shipped it.
-        self.interact: Optional[Any] = None  # 0d: the Interaction implementation
+        # Filled in by part 0e. Declared here so that part only has to assign them, and so a
+        # strategy can check for one without knowing which part shipped it.
         self.answers: Optional[Any] = None  # 0e: the persisted answer store
         self.steps: Optional[Any] = None  # 0e: the ledger for non-idempotent steps
 
