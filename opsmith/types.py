@@ -1,6 +1,6 @@
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Type
+from typing import Dict, List, Optional, Type
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
@@ -226,11 +226,27 @@ class DeploymentConfig(ServiceList):
 
     def get_configured_env_vars(self) -> dict:
         """Retrieves a dictionary of configured environment variable with defaults."""
-        env_vars = {}
+        return {key: config.default_value for key, config in self.get_env_var_configs().items()}
+
+    def get_env_var_configs(self) -> Dict[str, EnvVarConfig]:
+        """
+        Retrieves every configured environment variable, keeping what each one declares.
+
+        Two services may declare the same variable and disagree about whether it is a secret. The
+        secret reading wins, because treating a secret as ordinary puts it in a file that is
+        committed, while the reverse only hides a value that did not need hiding.
+
+        :return: The configuration of each environment variable, by key.
+        """
+        configs: Dict[str, EnvVarConfig] = {}
         for service in self.services:
             for env_var in service.env_vars:
-                env_vars[env_var.key] = env_var.default_value
-        return env_vars
+                existing = configs.get(env_var.key)
+                if existing is None:
+                    configs[env_var.key] = env_var
+                elif env_var.is_secret and not existing.is_secret:
+                    configs[env_var.key] = env_var
+        return configs
 
     @classmethod
     def load(cls: Type["DeploymentConfig"], deployments_path: Path) -> Optional["DeploymentConfig"]:
@@ -296,7 +312,13 @@ class FrontendCDNState(BaseModel):
     certificate_id: Optional[str] = Field(None, description="The ID or ARN of the SSL certificate.")
     build_env_vars: dict = Field(
         default_factory=dict,
-        description="Build-time environment variables for the service, keyed by service slug.",
+        exclude=True,
+        description=(
+            "Build-time environment variables as an older Opsmith wrote them here. It is read so"
+            " the values already on disk are not lost, and never written again: they include"
+            " secrets, and a state file is not where a secret belongs. They move to the"
+            " environment's answer store on the next release or update."
+        ),
     )
 
 

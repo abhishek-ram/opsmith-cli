@@ -20,6 +20,7 @@ requires-python = ">=3.12"
 dependencies = [
     "ansible==14.3.1",
     "boto3==1.43.89",
+    "dnspython==2.8.0",
     "gitpython==3.1.50",
     "google-api-python-client==2.200.0",
     "google-cloud-compute==1.52.0",

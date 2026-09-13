@@ -1,8 +1,18 @@
-"""Runs ansible playbooks in a working directory prepared from a template."""
+"""Runs ansible playbooks in a working directory prepared from a template.
+
+Extra variables reach the playbook through a file rather than the command line. They carry the
+whole compose ``.env`` body, and anything on a command line is readable by every process on the
+machine and is repeated in the details of a failure - which ``no_log`` on the remote task does
+nothing about, because the exposure is local.
+"""
 
 import json
+import os
+import stat
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, Iterator, List, Optional, Union
 
 from opsmith.core.errors import AnsibleFailed
 from opsmith.core.events import EventSink
@@ -69,7 +79,34 @@ class AnsibleProvisioner(BaseInfrastructureProvisioner):
         if user:
             command.extend(["--user", user])
 
-        if extra_vars:
-            command.extend(["--extra-vars", json.dumps(extra_vars)])
+        with _extra_vars_file(extra_vars) as vars_path:
+            if vars_path is not None:
+                command.extend(["--extra-vars", f"@{vars_path}"])
+            return self._run_command(command)
 
-        return self._run_command(command)
+
+@contextmanager
+def _extra_vars_file(extra_vars: Dict[str, Union[str, List[str]]]) -> Iterator[Optional[Path]]:
+    """
+    Writes the extra variables somewhere only this user can read, for the length of the run.
+
+    The file is removed on the way out, including when the playbook fails, so nothing is left at
+    rest holding an application's secrets. That does mean the command recorded in a failure cannot
+    be pasted back into a shell verbatim; the working directory it names is still where to look.
+
+    :param extra_vars: The variables the playbook needs.
+    :return: The file to pass as ``--extra-vars @file``, or None when there are no variables.
+    """
+    if not extra_vars:
+        yield None
+        return
+
+    handle, name = tempfile.mkstemp(prefix="opsmith-vars-", suffix=".json")
+    path = Path(name)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as vars_file:
+            json.dump(extra_vars, vars_file)
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+        yield path
+    finally:
+        path.unlink(missing_ok=True)

@@ -1,4 +1,5 @@
 import base64
+import functools
 import json
 import shutil
 import time
@@ -13,12 +14,7 @@ from pydantic import BaseModel, Field
 from pydantic_ai.messages import ModelMessage
 
 from opsmith.cloud_providers.base import BaseCloudProvider, MachineType, MachineTypeList
-from opsmith.core.errors import (
-    AnsibleFailed,
-    LlmGaveUp,
-    OpsmithError,
-    UnknownEnvironment,
-)
+from opsmith.core.errors import AnsibleFailed, LlmGaveUp, UnknownEnvironment
 from opsmith.core.events import (
     STEP_COMPOSE,
     STEP_DESTROY,
@@ -45,7 +41,7 @@ from opsmith.types import (
     ServiceInfo,
     ServiceTypeEnum,
 )
-from opsmith.utils import slugify
+from opsmith.utils import dns_record_is_published, slugify
 
 
 class DockerComposeLogValidation(BaseModel):
@@ -83,6 +79,21 @@ class DockerComposeContent(BaseModel):
     )
 
 
+def _dns_record_slug(record: Dict[str, str]) -> str:
+    """
+    Names one DNS record, for the key its wait is recorded under.
+
+    The wait is keyed on the record rather than on the service it belongs to, because one frontend
+    service needs two unrelated records - one that validates its certificate and one that points
+    at its CDN - and a key they shared would let the first one satisfy the second.
+
+    :param record: The record, with its type, name and value.
+    :return: The slug naming it.
+    """
+    name = (record.get("name") or "record").replace(".", "-")
+    return slugify(name).strip("-") or "record"
+
+
 class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
     """Monolithic deployment strategy."""
 
@@ -115,7 +126,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         # Parse env_file_content from LLM
         env_file_vars = dotenv_values(stream=StringIO(env_file_content))
 
-        configured_env = deployment_config.get_configured_env_vars()
+        configured_env = deployment_config.get_env_var_configs()
 
         self.events.step(
             STEP_COMPOSE, "Please confirm or provide values for environment variables:"
@@ -126,10 +137,20 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             # Exclude any custom env that is not configured
             if key not in configured_env:
                 continue
-            # Precedence: llm > code default
-            default_value = value or configured_env[key]
+
+            config = configured_env[key]
+
+            # Precedence: what this environment is already running with > llm > code default.
+            # The model regenerates this file on every attempt, so without the first of those a
+            # retry would offer a freshly invented password for a database that already has one.
+            remembered = self.answers.get(f"envvar.{key}")
+            default_value = remembered or value or config.default_value
+
             answers[key] = self.interact.ask(
-                f"envvar.{key}", f"Enter value for {key}", default=default_value
+                f"envvar.{key}",
+                f"Enter value for {key}",
+                default=default_value,
+                secret=config.is_secret,
             )
 
         # For the .env file, merge with precedence: user answers > llm
@@ -504,7 +525,17 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
     def _prompt_for_build_env_vars(
         self, service: ServiceInfo, existing_vars: Optional[dict] = None
     ) -> dict:
-        """Prompt user for build environment variables for services."""
+        """
+        Collects the environment variables a frontend needs while it is being built.
+
+        The values live in the environment's answer store, where the secrets among them are kept
+        apart. They used to live in ``state.yml``, in the clear; ``existing_vars`` is how a state
+        file written by an older Opsmith hands them over, once.
+
+        :param service: The frontend service being built.
+        :param existing_vars: What an older state file still holds for it, if anything.
+        :return: The value of each variable the service declares.
+        """
         service_vars = existing_vars.copy() if existing_vars else {}
         if not service.env_vars:
             return service_vars
@@ -514,7 +545,17 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             f"Configuring build-time environment variables for service `{service.name_slug}`:",
         )
         for env_var in service.env_vars:
-            default_val = service_vars.get(env_var.key, env_var.default_value)
+            key = f"build_env.{service.name_slug}.{env_var.key}"
+
+            # An older Opsmith kept these in state.yml. Moving them into the store here is the
+            # whole migration: from this run on they are answers like any other, which is also
+            # what stops a run with nobody at the keyboard from asking for them again.
+            legacy = service_vars.get(env_var.key)
+            if legacy is not None and self.answers.get(key) is None:
+                self.answers.record(key, legacy, secret=env_var.is_secret)
+
+            remembered = self.answers.get(key)
+            default_val = remembered if remembered is not None else env_var.default_value
 
             if env_var.is_secret:
                 message = f"  Enter value for secret '{env_var.key}'"
@@ -522,7 +563,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                 message = f"  Enter value for '{env_var.key}'"
 
             service_vars[env_var.key] = self.interact.ask(
-                f"build_env.{service.name_slug}.{env_var.key}",
+                key,
                 message,
                 default=default_val,
                 secret=env_var.is_secret,
@@ -536,8 +577,18 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         cloud_provider: BaseCloudProvider,
         environment: DeploymentEnvironment,
         cdn_state: FrontendCDNState,
+        build_env_vars: dict,
     ):
-        """Builds frontend assets and uploads them to cloud storage."""
+        """
+        Builds frontend assets and uploads them to cloud storage.
+
+        :param service: The frontend service being built.
+        :param cloud_provider: The provider holding the bucket and the CDN.
+        :param environment: The environment being deployed to.
+        :param cdn_state: Where the built assets go.
+        :param build_env_vars: The variables the build needs, which come from the answer store
+            rather than from ``cdn_state``, because some of them are secret.
+        """
         self.events.step(
             STEP_FRONTEND, f"Building and deploying assets for '{service.name_slug}'..."
         )
@@ -559,7 +610,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             "build_path": service.build_path,
             "bucket_name": cdn_state.bucket_name,
             "project_root": str(self.src_dir),
-            "build_env_vars": cdn_state.build_env_vars,
+            "build_env_vars": build_env_vars,
             "cdn_distribution_id": cdn_state.cdn_distribution_id,
             "cdn_url_map": cdn_state.cdn_url_map,
         }
@@ -606,7 +657,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
 
         dns_records_json = outputs.get("dns_records")
         if dns_records_json:
-            self._confirm_dns_records(json.loads(dns_records_json))
+            self._wait_for_dns_records(json.loads(dns_records_json))
             with self.events.waiting(STEP_DNS, "Waiting 15 seconds for DNS propagation..."):
                 time.sleep(15)
 
@@ -653,7 +704,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
 
         dns_records_json = outputs.get("dns_records")
         if dns_records_json:
-            self._confirm_dns_records(json.loads(dns_records_json))
+            self._wait_for_dns_records(json.loads(dns_records_json))
 
         return outputs
 
@@ -696,15 +747,20 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             "env.instance_type", "Select an instance type for the new environment", choices
         )
 
-    def _confirm_dns_records(
+    def _wait_for_dns_records(
         self,
         dns_records: List[Dict[str, str]],
     ):
         """
-        Confirms the DNS records for the created service/s.
+        Shows the DNS records the user has to create, and waits until they resolve.
+
+        Waiting rather than asking is what makes the step resumable: a run with nobody at the
+        keyboard polls until its timeout and then stops with the outstanding records, and creating
+        them and running the command again picks up here.
 
         :param dns_records: The records the user has to create, each with a type, name and value.
-        :raises OpsmithError: The user did not confirm the records were created.
+        :raises InteractionCancelled: The user stopped waiting.
+        :raises PendingActionError: A record was still missing when the run gave up waiting.
         """
         self.events.step(
             STEP_DNS,
@@ -722,20 +778,15 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             lines.append("----------------------------------------")
             self.events.log(STEP_DNS, "\n".join(lines), record=record)
 
-        configured = self.interact.confirm(
-            "dns.confirm",
-            (
-                "Have you configured the DNS records as shown above? (This might take"
-                " a few minutes to propagate)"
-            ),
-            details={"records": dns_records},
-            default=True,
-        )
-        if not configured:
-            raise OpsmithError(
-                "DNS configuration was not confirmed, so the deployment cannot continue.",
-                hint="Create the records shown above, then run the command again.",
-                details={"records": dns_records},
+        for record in dns_records:
+            self.interact.wait_for(
+                f"dns.{_dns_record_slug(record)}",
+                (
+                    f"Create the {record.get('type')} record for {record.get('name')}, pointing at"
+                    f" {record.get('value')}. This can take a few minutes to propagate."
+                ),
+                check=functools.partial(dns_record_is_published, record),
+                details={"records": [record]},
             )
 
     def _deploy_frontend_service(
@@ -772,7 +823,6 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             cdn_distribution_id=cdn_outputs.get("cdn_distribution_id"),
             cdn_url_map=cdn_outputs.get("cdn_url_map"),
             certificate_id=cdn_outputs.get("certificate_id"),
-            build_env_vars=build_env_vars,
         )
         env_state.frontend_cdn.append(cdn_state)
 
@@ -781,6 +831,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             cloud_provider,
             environment,
             cdn_state,
+            build_env_vars,
         )
         self.events.log(
             STEP_FRONTEND,
@@ -872,7 +923,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                         "value": virtual_machine_state.public_ip,
                     }
                 )
-            self._confirm_dns_records(dns_records)
+            self._wait_for_dns_records(dns_records)
 
             env_state.registry_url = registry_url
             env_state.virtual_machine = virtual_machine_state
@@ -897,7 +948,11 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         env_state_path = self._get_env_state_path(environment.name)
         env_state = MonolithicDeploymentState.load(env_state_path)
         cloud_provider = environment.cloud_provider_instance
-        state_updated = False
+
+        # Nothing here writes the state file. A release deploys what the configuration already
+        # describes: the build-time values it collects belong to the answer store now, and the
+        # snapshots of what is deployed are written by deploy and by update, which are the two
+        # that can change them.
 
         # Release frontend services
         frontend_services = self._get_frontend_services(deployment_config)
@@ -920,15 +975,13 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                 build_env_vars = self._prompt_for_build_env_vars(
                     service, existing_vars=cdn_state.build_env_vars
                 )
-                if cdn_state.build_env_vars != build_env_vars:
-                    cdn_state.build_env_vars = build_env_vars
-                    state_updated = True
 
                 self._build_and_upload_frontend_assets(
                     service,
                     cloud_provider,
                     environment,
                     cdn_state,
+                    build_env_vars,
                 )
                 self.events.log(
                     STEP_FRONTEND,
@@ -956,6 +1009,11 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                 )
                 existing_env_content = fetched_files[0]
                 existing_compose_content = fetched_files[1]
+
+                # The machine is what the application is actually running with, so its environment
+                # file is the truth about these values from here on - not the local cache that
+                # carried them until it existed.
+                self.answers.adopt_env_file(existing_env_content)
 
                 docker_compose_content = DockerComposeContent(
                     content=existing_compose_content,
@@ -993,9 +1051,6 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                         " other services."
                     ),
                 )
-
-        if state_updated:
-            env_state.save(env_state_path)
 
     def destroy(
         self,
@@ -1321,11 +1376,9 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                     build_env_vars = self._prompt_for_build_env_vars(
                         service, existing_vars=cdn_state.build_env_vars
                     )
-                    if cdn_state.build_env_vars != build_env_vars:
-                        cdn_state.build_env_vars = build_env_vars
 
                     self._build_and_upload_frontend_assets(
-                        service, cloud_provider, environment, cdn_state
+                        service, cloud_provider, environment, cdn_state, build_env_vars
                     )
                     self.events.log(
                         STEP_FRONTEND,
@@ -1364,6 +1417,10 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                 [env_file_path],
             )
             existing_env_content = fetched_files[0]
+            # The machine is what the application is actually running with, so its environment
+            # file is the truth about these values from here on - not the local cache that
+            # carried them until it existed.
+            self.answers.adopt_env_file(existing_env_content)
 
             # Regenerate docker-compose with existing env as starting point
             self.events.step(STEP_COMPOSE, "Regenerating docker-compose configuration...")

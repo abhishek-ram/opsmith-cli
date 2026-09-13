@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 from opsmith.cli import app as app_module
 from opsmith.cli.app import handle_errors
+from opsmith.cli.interaction import TerminalInteraction
 from opsmith.cli.output import JsonRenderer, TextRenderer
 from opsmith.core import errors
 from opsmith.core.errors import (
@@ -41,8 +42,8 @@ def test_every_error_class_has_an_exit_code():
 def test_exit_codes_match_the_cli_contract():
     """
     Asserts the code-to-exit-code map is exactly the table in the migration plan, for the
-    codes this part declares. MISSING_ANSWER, which shares exit code 3, and PENDING_ACTION
-    arrive with headless mode in part 0e.
+    codes declared so far. The recipe, template, capacity and remote state codes belong to
+    later phases and are not here yet.
     """
     assert EXIT_CODES == {
         "INTERNAL": 1,
@@ -51,13 +52,16 @@ def test_exit_codes_match_the_cli_contract():
         "UNKNOWN_ENVIRONMENT": 2,
         "UNKNOWN_SERVICE": 2,
         "INTERACTION_CANCELLED": 3,
+        "MISSING_ANSWER": 3,
         "TERRAFORM_FAILED": 4,
         "ANSIBLE_FAILED": 4,
         "DOCKER_FAILED": 4,
         "DEPLOY_UNHEALTHY": 4,
+        "EDIT_REQUIRED": 4,
         "CLOUD_CREDENTIALS": 5,
         "CLOUD_PERMISSION": 5,
         "LLM_GAVE_UP": 6,
+        "PENDING_ACTION": 8,
     }
 
 
@@ -93,9 +97,15 @@ def probe_app(monkeypatch, tmp_project):
         raise LlmGaveUp("the model produced nothing usable")
 
     def cancels_a_prompt(ctx: typer.Context):
-        """A command whose user interrupts a question, through the real interaction."""
+        """A command whose user interrupts a question, through the terminal interaction.
+
+        It builds that interaction rather than using the run's, because a test runner has no
+        terminal and the run therefore chose the headless one. What is under test here is the
+        route from a cancelled prompt to an exit code, not how the implementation is chosen.
+        """
+        interact = TerminalInteraction(ctx.obj.renderer)
         with patch("opsmith.cli.interaction.inquirer.prompt", side_effect=KeyboardInterrupt):
-            ctx.obj.context.interact.ask("app.name", "Enter the application name")
+            interact.ask("app.name", "Enter the application name")
 
     def raises_value_error(ctx: typer.Context):
         """A command that raises an exception opsmith does not anticipate."""

@@ -7,14 +7,17 @@ constructible in a test.
 """
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 from pydantic_ai import Agent
 
+from opsmith.core.answers import AnswerStore
 from opsmith.core.events import EventSink
 from opsmith.core.interaction import Interaction
 from opsmith.core.provisioners import ProvisionerFactory
+from opsmith.core.steps import StepLedger
 from opsmith.git_repo import GitRepo
+from opsmith.utils import project_state_dir
 
 
 class OpsmithContext:
@@ -34,6 +37,7 @@ class OpsmithContext:
         agent: Optional[Agent] = None,
         git_repo: Optional[GitRepo] = None,
         verbose: bool = False,
+        answers: Optional[AnswerStore] = None,
     ):
         """
         The first five are how a run reaches the world, so every run has them: a context without
@@ -51,7 +55,11 @@ class OpsmithContext:
         :param git_repo: An already-built repository handle. Left out in normal use, where it is
             opened lazily; supplied by tests that have no repository on disk.
         :param verbose: Whether the run was asked for detailed output.
+        :param answers: What this environment has already been asked. Built here when it is not
+            supplied; the CLI supplies one because it has to hand the same store to the
+            interaction it builds against it, and that happens before there is a context.
         """
+        state_dir = project_state_dir(deployments_path)
         self.src_dir = src_dir
         self.deployments_path = deployments_path
         self.events = events
@@ -61,14 +69,19 @@ class OpsmithContext:
         self.verbose = verbose
         self._git_repo = git_repo
 
+        # Where an answer already given is read from, and where a new one is written. Never
+        # None: a strategy asks a question wherever it needs one, and should not have to check
+        # whether anybody remembered to build the thing that remembers the answer. Neither of
+        # these is in the repository - see `project_state_dir` for why.
+        self.answers = answers if answers is not None else AnswerStore(state_dir)
+
+        # Not a parameter: a ledger is decided entirely by the path, so there is nothing for a
+        # caller to choose and nothing to share it with.
+        self.steps = StepLedger(state_dir)
+
         # Recorded by the CLI when a command that requires terraform checks for it, so a later
         # step can read the version without probing again.
         self.terraform_version: Optional[str] = None
-
-        # Filled in by part 0e. Declared here so that part only has to assign them, and so a
-        # strategy can check for one without knowing which part shipped it.
-        self.answers: Optional[Any] = None  # 0e: the persisted answer store
-        self.steps: Optional[Any] = None  # 0e: the ledger for non-idempotent steps
 
     @property
     def git_repo(self) -> GitRepo:

@@ -43,6 +43,10 @@ def _review(
     It is a plain loop now, because the same rules have to hold for a run with nobody at the
     keyboard, and only the caller knows what to do with what comes back.
 
+    The loop terminates with nobody there too: a headless review editor accepts a proposal once,
+    and refuses the same key a second time, because being asked again means what it accepted did
+    not parse and accepting it again would only not parse again.
+
     :param interact: How the run reaches the user.
     :param key: The interaction key the edit is addressed by.
     :param message: What the user is being asked to review.

@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 from opsmith.core.context import OpsmithContext
 from opsmith.core.errors import InteractionCancelled
 from opsmith.core.events import Event, EventSink
+from opsmith.settings import settings
 
 
 @pytest.fixture
@@ -60,6 +61,74 @@ def reset_rich_console():
     original = rich._console
     yield
     rich._console = original
+
+
+@pytest.fixture(autouse=True)
+def no_real_state_dir(tmp_path: Path, monkeypatch):
+    """
+    Keeps every test's remembered answers inside its own temporary directory.
+
+    What Opsmith remembers about a project lives outside the project, under the home directory.
+    It is autouse because a test that reached the real one would write a developer's own machine,
+    read back another test's answers, and pass or fail depending on what had run before it.
+    """
+    monkeypatch.setattr(settings, "state_dir", str(tmp_path / "opsmith-state"))
+
+
+class FakeDns:
+    """The DNS a run can see, so no test ever asks a real resolver.
+
+    Everything Opsmith asks for is published by default, which is the state a deploy proceeds
+    through; a test that is about waiting says so, and then only the records it names resolve.
+    """
+
+    def __init__(self):
+        #: The records that resolve, or None while every record does.
+        self.published: Optional[List[Dict[str, str]]] = None
+        #: Every record that was looked up, in order.
+        self.lookups: List[Dict[str, str]] = []
+
+    def publish_nothing(self):
+        """Makes every record look as though it has not been created yet."""
+        self.published = []
+
+    def publish(self, *records: Dict[str, str]):
+        """
+        Makes exactly these records resolve, and no others.
+
+        :param records: The records that have been created.
+        """
+        self.published = list(records)
+
+    def is_published(self, record: Dict[str, str]) -> bool:
+        """
+        Stands in for the resolver.
+
+        :param record: The record being checked for.
+        :return: Whether it resolves.
+        """
+        self.lookups.append(record)
+        return True if self.published is None else record in self.published
+
+
+@pytest.fixture
+def dns() -> FakeDns:
+    """The DNS a run can see. Ask it to publish nothing to exercise a wait."""
+    return FakeDns()
+
+
+@pytest.fixture(autouse=True)
+def no_real_dns(dns: FakeDns, monkeypatch):
+    """
+    Replaces the resolver everywhere, for every test.
+
+    It is autouse because a DNS lookup that escaped would be slow, would depend on the network,
+    and would answer differently on someone else's machine.
+    """
+    monkeypatch.setattr("opsmith.utils.dns_record_is_published", dns.is_published)
+    monkeypatch.setattr(
+        "opsmith.deployment_strategies.monolithic.dns_record_is_published", dns.is_published
+    )
 
 
 class RecordingSink(EventSink):

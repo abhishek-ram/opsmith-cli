@@ -8,10 +8,11 @@ envelope.
 import functools
 import inspect
 import os
+import shlex
 import sys
 import traceback
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import rich
 import typer
@@ -30,20 +31,101 @@ from opsmith.cli.output import (
 )
 from opsmith.cli.state import CliState
 from opsmith.cloud_providers import CLOUD_PROVIDER_REGISTRY
+from opsmith.core.answers import AnswerSources, AnswerStore
 from opsmith.core.context import OpsmithContext
 from opsmith.core.errors import EXIT_CODES, InvalidArgument, OpsmithError
 from opsmith.core.events import EventSink
+from opsmith.core.interaction import HeadlessInteraction, Interaction
 from opsmith.core.llm import configure_agent, resolve_model_config
 from opsmith.core.provisioners import ProvisionerFactory
 from opsmith.deployment_strategies import DEPLOYMENT_STRATEGY_REGISTRY
 from opsmith.models import MODEL_REGISTRY
 from opsmith.settings import settings
-from opsmith.utils import check_external_tools
+from opsmith.utils import check_external_tools, project_state_dir
 
 app = typer.Typer(pretty_exceptions_show_locals=False)
 config_app = typer.Typer(
     help="Inspect and validate the deployment configuration, without touching a cloud."
 )
+
+
+#: Options whose value is a credential. They are dropped from the resume command, which is
+#: reported in an error envelope and read by whatever is driving the run.
+SECRET_OPTIONS: Set[str] = {"--api-key", "--logfire-token"}
+
+
+def _resume_command(argv: List[str]) -> str:
+    """
+    Describes the invocation that is running, so a stop can say how to continue it.
+
+    Everything the run was told is preserved, because the point of the resume command is that it
+    carries the answers already supplied; the credentials are the exception, since the string ends
+    up in an error envelope on stdout.
+
+    :param argv: The process argument vector.
+    :return: The command to run again, quoted for a shell.
+    """
+    if not argv:
+        return "opsmith"
+
+    parts = [Path(argv[0]).name]
+    drop_value = False
+    for token in argv[1:]:
+        if drop_value:
+            drop_value = False
+            continue
+        if token.split("=", 1)[0] in SECRET_OPTIONS:
+            drop_value = "=" not in token
+            continue
+        parts.append(token)
+
+    return shlex.join(parts)
+
+
+def _is_headless(non_interactive: bool, output: OutputFormat, stdin: Any) -> bool:
+    """
+    Decides whether this run has anybody to ask.
+
+    JSON output counts as headless whatever the terminal says, because a prompt draws on stdout
+    and stdout in that mode carries exactly one envelope and nothing else.
+
+    :param non_interactive: Whether --non-interactive or OPSMITH_NON_INTERACTIVE was given.
+    :param output: The output mode.
+    :param stdin: The run's standard input, asked whether it is a terminal.
+    :return: Whether to resolve answers instead of prompting.
+    """
+    return non_interactive or output is OutputFormat.JSON or not stdin.isatty()
+
+
+def _build_interaction(
+    renderer: BaseRenderer,
+    sources: AnswerSources,
+    answers: AnswerStore,
+    *,
+    headless: bool,
+    wait_timeout: int,
+    resume: str,
+) -> Interaction:
+    """
+    Builds the way this run reaches a person, or stands in for one.
+
+    :param renderer: The run's renderer, which is also its event sink.
+    :param sources: What the run was told up front.
+    :param answers: What this environment has already answered.
+    :param headless: Whether there is anybody to ask.
+    :param wait_timeout: Seconds to poll an external action before giving up.
+    :param resume: The command to run again, reported with every stop.
+    :return: The interaction to put on the context.
+    """
+    if headless:
+        return HeadlessInteraction(
+            sources,
+            answers,
+            events=renderer,
+            wait_timeout=wait_timeout,
+            resume=resume,
+        )
+    return TerminalInteraction(renderer, sources=sources, answers=answers)
 
 
 def _drain_registry_events(events: EventSink):
@@ -316,38 +398,46 @@ def main(
         False,
         "--non-interactive",
         envvar="OPSMITH_NON_INTERACTIVE",
-        help="Never prompt; answers must come from the answer options. Not yet implemented.",
+        help=(
+            "Never prompt; answers come from the answer options, and a question none of them"
+            " covers stops the run. Implied by --output json and by a stdin that is not a"
+            " terminal."
+        ),
     ),
     answer: Optional[List[str]] = typer.Option(
         None,
         "--answer",
-        help="Inline answer as key=value. Repeatable. Not yet implemented.",
+        help="Inline answer as key=value. Repeatable, and wins over every other source.",
     ),
     answers: Optional[Path] = typer.Option(
         None,
         "--answers",
-        help="YAML file mapping prompt key to value. Not yet implemented.",
+        help="YAML file mapping prompt key to value.",
     ),
     env_file: Optional[Path] = typer.Option(
         None,
         "--env-file",
-        help="Dotenv file answering envvar.<KEY> prompts, secrets included. Not yet implemented.",
+        help="Dotenv file answering envvar.<KEY> prompts, secrets included.",
     ),
     accept_defaults: bool = typer.Option(
         False,
         "--accept-defaults",
-        help="Take each question's default instead of failing on it. Not yet implemented.",
+        help=(
+            "Take each question's default instead of stopping on it. Destructive"
+            " confirmations are excluded."
+        ),
     ),
     yes: bool = typer.Option(
         False,
         "--yes",
-        help="Accept destructive confirmations. Not yet implemented.",
+        help="Accept destructive confirmations, such as deleting an environment.",
     ),
     wait_timeout: int = typer.Option(
         600,
         "--wait-timeout",
         help=(
-            "Seconds a headless run polls an external action before giving up. Not yet implemented."
+            "Seconds a headless run polls an external action, such as a DNS record being"
+            " created, before stopping so it can be done."
         ),
     ),
 ):
@@ -357,16 +447,30 @@ def main(
     # The renderer is built before anything that can fail, so every error has somewhere to go.
     # It is also the run's event sink, so progress and outcome go through one object.
     resolved_src_dir = Path(src_dir or os.getcwd())
+    deployments_path = resolved_src_dir.joinpath(settings.deployments_dir)
     renderer = build_renderer(output)
+
+    # One store, shared by the context and by the interaction built against it. Binding it to an
+    # environment later mutates it in place, which is how a question asked before the environment
+    # is known still ends up in that environment's file.
+    answer_store = AnswerStore(project_state_dir(deployments_path), events=renderer)
+    resume = _resume_command(sys.argv)
+    headless = _is_headless(non_interactive, output, sys.stdin)
+
+    # Reading the answer options can fail, and an error has to render through the renderer this
+    # run actually chose. So the context starts with an interaction that cannot fail - a headless
+    # one told nothing - and the configured one replaces it inside the guarded block below.
+    context = OpsmithContext(
+        src_dir=resolved_src_dir,
+        deployments_path=deployments_path,
+        events=renderer,
+        provisioner_factory=ProvisionerFactory(events=renderer),
+        interact=HeadlessInteraction(AnswerSources(), answer_store, events=renderer, resume=resume),
+        verbose=verbose,
+        answers=answer_store,
+    )
     ctx.obj = CliState(
-        context=OpsmithContext(
-            src_dir=resolved_src_dir,
-            deployments_path=resolved_src_dir.joinpath(settings.deployments_dir),
-            events=renderer,
-            provisioner_factory=ProvisionerFactory(events=renderer),
-            interact=TerminalInteraction(renderer),
-            verbose=verbose,
-        ),
+        context=context,
         output=output,
         renderer=renderer,
         verbose=verbose,
@@ -394,6 +498,21 @@ def main(
             renderer.render_logo(build_logo())
 
         _drain_registry_events(renderer)
+
+        context.interact = _build_interaction(
+            renderer,
+            AnswerSources.load(
+                inline=answer,
+                answers_path=answers,
+                env_path=env_file,
+                accept_defaults=accept_defaults,
+                assume_yes=yes,
+            ),
+            answer_store,
+            headless=headless,
+            wait_timeout=wait_timeout,
+            resume=resume,
+        )
     except typer.Exit as exit_exc:
         _report_passthrough_exit(ctx, exit_exc.exit_code)
         raise

@@ -326,6 +326,15 @@ wheels = [
 ]
 
 [[package]]
+name = "dnspython"
+version = "2.8.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/8c/8b/57666417c0f90f08bcafa776861060426765fdb422eb10212086fb811d26/dnspython-2.8.0.tar.gz", hash = "sha256:181d3c6996452cb1189c4046c61599b84a5a86e099562ffde77d26984ff26d0f", size = 368251 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ba/5a/18ad964b0086c6e62e2e7500f7edc89e3faa45033c71c1893d34eed2b2de/dnspython-2.8.0-py3-none-any.whl", hash = "sha256:01d9bbc4a2d76bf0db7c1f729812ded6d912bd318d3b1cf81d30c0f845dbf3af", size = 331094 },
+]
+
+[[package]]
 name = "docstring-parser"
 version = "0.17.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1131,6 +1140,7 @@ source = { editable = "." }
 dependencies = [
     { name = "ansible" },
     { name = "boto3" },
+    { name = "dnspython" },
     { name = "gitpython" },
     { name = "google-api-python-client" },
     { name = "google-cloud-compute" },
@@ -1167,6 +1177,7 @@ dev = [
 requires-dist = [
     { name = "ansible", specifier = "==14.3.1" },
     { name = "boto3", specifier = "==1.43.89" },
+    { name = "dnspython", specifier = "==2.8.0" },
     { name = "gitpython", specifier = "==3.1.50" },
     { name = "google-api-python-client", specifier = "==2.200.0" },
     { name = "google-cloud-compute", specifier = "==1.52.0" },

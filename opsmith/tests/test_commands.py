@@ -9,9 +9,12 @@ import typer
 from typer.testing import CliRunner
 
 from opsmith.cli import app as app_module
+from opsmith.cli.interaction import TerminalInteraction
 from opsmith.cli.output import OutputFormat
 from opsmith.cli.state import CliState
 from opsmith.core.context import OpsmithContext
+from opsmith.core.errors import EXIT_CODES
+from opsmith.core.interaction import HeadlessInteraction
 from opsmith.utils import ExternalToolReport
 
 
@@ -70,7 +73,11 @@ def test_callback_builds_the_state_from_the_global_options(cli, runner, tmp_proj
 
 def _run_setup_capturing_the_detector(cli, runner, *extra_args: str):
     """
-    Runs setup far enough to build the detector, then cancels the first prompt.
+    Runs setup far enough to build the detector, then lets it stop at the first question.
+
+    A test runner has no terminal, so the run is headless and nothing answers the application
+    name: setup stops there with a missing answer. That is after the detector is built, which is
+    all this needs.
 
     :param cli: The Typer app under test.
     :param runner: The CLI runner.
@@ -80,9 +87,9 @@ def _run_setup_capturing_the_detector(cli, runner, *extra_args: str):
     with patch("opsmith.cli.commands.setup.ServiceDetector") as detector_class:
         with patch("opsmith.cli.commands.setup.DeploymentConfig") as config_class:
             config_class.load.return_value = None
-            with patch("opsmith.cli.interaction.inquirer.prompt", side_effect=KeyboardInterrupt):
-                # Cancel the application name prompt, before anything calls the model.
-                runner.invoke(cli, _base_args(*extra_args, "setup"))
+            result = runner.invoke(cli, _base_args(*extra_args, "setup"))
+
+    assert result.exit_code == EXIT_CODES["MISSING_ANSWER"]
     return detector_class
 
 
@@ -162,3 +169,103 @@ def test_not_a_git_repository_exits_two(cli, runner, tmp_path: Path, monkeypatch
     assert result.exit_code == 2
     assert envelope["error"]["code"] == "INVALID_ARGUMENT"
     assert envelope["error"]["details"]["src_dir"] == str(plain_dir)
+
+
+def _interaction_of(cli, runner, *extra_args: str):
+    """
+    Runs a command far enough to build the interaction, and returns the one it built.
+
+    :param cli: The Typer app under test.
+    :param runner: The CLI runner.
+    :param extra_args: Global options to pass before the command.
+    :return: The interaction on the run's context.
+    """
+    captured = {}
+
+    def probe(ctx: typer.Context):
+        """Records how this run was told to reach a person."""
+        captured["interact"] = ctx.obj.context.interact
+
+    cli.command()(app_module.handle_errors(probe))
+    result = runner.invoke(cli, _base_args(*extra_args, "probe"))
+    assert result.exit_code == 0, result.output
+    return captured["interact"]
+
+
+def test_a_run_without_a_terminal_resolves_answers_instead_of_asking(cli, runner):
+    """
+    A test runner's stdin is not a terminal, which is the same situation as a pipe or a CI job:
+    there is nobody to prompt, so answers come from what the run was told.
+    """
+    assert isinstance(_interaction_of(cli, runner), HeadlessInteraction)
+
+
+def test_a_run_with_a_terminal_prompts(cli, runner, monkeypatch):
+    """
+    With somebody there, the questions are put to them.
+
+    The rule that decides this is exercised below; what is under test here is that the callback
+    honours it, which a test runner cannot show by having a terminal - it does not have one.
+    """
+    monkeypatch.setattr("opsmith.cli.app._is_headless", lambda *args: False)
+
+    assert isinstance(_interaction_of(cli, runner), TerminalInteraction)
+
+
+@pytest.mark.parametrize(
+    "non_interactive, output, a_terminal, headless",
+    [
+        (False, OutputFormat.TEXT, True, False),
+        (False, OutputFormat.TEXT, False, True),
+        (True, OutputFormat.TEXT, True, True),
+        (False, OutputFormat.JSON, True, True),
+    ],
+    ids=["at a terminal", "stdin redirected", "--non-interactive", "--output json"],
+)
+def test_what_decides_that_nobody_can_be_asked(non_interactive, output, a_terminal, headless):
+    """
+    A run is headless when it was told to be, when stdin is not a terminal, or when it is writing
+    JSON - because a prompt draws on the stdout that mode reserves for one envelope.
+    """
+    stdin = _ATerminal() if a_terminal else _APipe()
+
+    assert app_module._is_headless(non_interactive, output, stdin) is headless
+
+
+class _ATerminal:
+    """Stands in for a stdin that somebody is sitting in front of."""
+
+    @staticmethod
+    def isatty() -> bool:
+        """Reports that there is a terminal."""
+        return True
+
+
+class _APipe:
+    """Stands in for a stdin coming from a file, a pipe or a job runner."""
+
+    @staticmethod
+    def isatty() -> bool:
+        """Reports that there is no terminal."""
+        return False
+
+
+def test_the_resume_command_repeats_the_run_without_repeating_the_key():
+    """
+    Every stop reports the command to run again, and that string is printed in an error envelope
+    on stdout. The answers already supplied are what make the resume worth having; the
+    credentials are the one thing that must not travel with them.
+    """
+    resume = app_module._resume_command(
+        [
+            "/opt/homebrew/bin/opsmith",
+            "--api-key",
+            "sk-super-secret",
+            "--answer",
+            "env.region=us-east-1",
+            "--logfire-token=lf-secret",
+            "deploy",
+        ]
+    )
+
+    assert resume == "opsmith --answer env.region=us-east-1 deploy"

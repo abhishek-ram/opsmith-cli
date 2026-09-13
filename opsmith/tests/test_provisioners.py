@@ -5,6 +5,8 @@ error the CLI can map to an exit code, and where a template directory is looked 
 """
 
 import json
+import os
+import stat
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -13,6 +15,7 @@ import pytest
 
 from opsmith.core.errors import EXIT_CODES, AnsibleFailed, TerraformFailed
 from opsmith.core.provisioners import PACKAGE_TEMPLATES_DIR, ProvisionerFactory
+from opsmith.infra_provisioners.ansible_provisioner import AnsibleProvisioner
 
 
 @pytest.fixture
@@ -199,3 +202,35 @@ def test_the_ansible_provisioner_writes_its_config(factory, tmp_path: Path):
     factory.ansible(working_dir)
 
     assert "host_key_checking = False" in (working_dir / "ansible.cfg").read_text()
+
+
+def test_playbook_variables_never_reach_the_process_table(tmp_path: Path, events):
+    """
+    The extra vars carry the whole compose .env. Anything on a command line is readable by every
+    process on the machine and is repeated in the details of a failure, so they travel in a file
+    that only this user can read - and that is gone once the playbook has run.
+    """
+    working_dir = tmp_path / "compose"
+    provisioner = AnsibleProvisioner(
+        working_dir=working_dir, events=events, step="compose", templates_dir=tmp_path
+    )
+    (working_dir / "main.yml").write_text("- hosts: all\n", encoding="utf-8")
+
+    seen = {}
+
+    def capture(command, env=None):
+        """Reads the vars file while the playbook would still have been running."""
+        seen["command"] = command
+        path = Path(command[command.index("--extra-vars") + 1].lstrip("@"))
+        seen["path"] = path
+        seen["contents"] = json.loads(path.read_text(encoding="utf-8"))
+        seen["mode"] = stat.S_IMODE(os.stat(path).st_mode)
+        return {}
+
+    with patch.object(AnsibleProvisioner, "_run_command", side_effect=capture):
+        provisioner.run_playbook("main.yml", extra_vars={"env_file_content": "SECRET=hunter2"})
+
+    assert "hunter2" not in " ".join(seen["command"])
+    assert seen["contents"] == {"env_file_content": "SECRET=hunter2"}
+    assert seen["mode"] == stat.S_IRUSR | stat.S_IWUSR
+    assert not seen["path"].exists()

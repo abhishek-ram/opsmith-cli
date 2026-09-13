@@ -191,7 +191,14 @@ Every path under `.opsmith/` belongs to exactly one category, declared in code b
 |----------|-------|-----------|
 | owned | `deployments.yml`, `docker/<slug>/Dockerfile`, `templates/**`, `overrides/**`, `files/**`, `recipes/**`, and the same three directories under `environments/<env>/` | people and agents |
 | generated | `environments/<env>/<module>/**` working directories, `backend.tf`, `ansible.cfg`, marker files | opsmith only; rebuilt on every run |
-| state | `environments/<env>/state.yml`, `environments/<env>/answers.yml`, Terraform state, `.sync.json` | opsmith only; never by hand |
+| state | `environments/<env>/state.yml`, Terraform state, `.sync.json` | opsmith only; never by hand |
+
+What Opsmith *remembers* is not in the repository at all. The answers an environment has given,
+the secrets it holds until the environment itself does, and the steps a run has finished live
+under `~/.opsmith/projects/<name>-<digest>/environments/<env>/`, keyed on where the project is.
+None of it is authored, and the secret half must never be committed by any means - which an
+ignore rule cannot promise, since it says nothing about `git add -f`, an archive of the
+directory, or a build context that never read it.
 
 ### Config compatibility
 

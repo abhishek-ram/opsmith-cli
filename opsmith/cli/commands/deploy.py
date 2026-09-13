@@ -8,6 +8,7 @@ from rich import print
 from opsmith.cli.commands import requires
 from opsmith.cli.state import CliState
 from opsmith.cloud_providers import CLOUD_PROVIDER_REGISTRY
+from opsmith.core.answers import DELETE_CONFIRMATION
 from opsmith.core.interaction import Choice, Interaction
 from opsmith.deployment_strategies import DEPLOYMENT_STRATEGY_REGISTRY
 from opsmith.types import (
@@ -98,6 +99,21 @@ def _collect_domain_configuration(
     return domain_email, domains
 
 
+def _remember_answers_for(state: CliState, environment_name: str):
+    """
+    Points the answer store and the step ledger at the environment this run is about.
+
+    It happens as soon as the environment is named, and not before, because the question that
+    names it is itself an answer: everything asked up to this point is held in memory and written
+    out here, into the environment it turned out to belong to.
+
+    :param state: The run's state, holding the context these live on.
+    :param environment_name: The environment that was selected or named.
+    """
+    state.context.answers.use_environment(environment_name)
+    state.context.steps.use_environment(environment_name)
+
+
 @requires("docker", "terraform")
 def deploy(ctx: typer.Context):
     """Deploy the application to a specified environment."""
@@ -120,6 +136,9 @@ def deploy(ctx: typer.Context):
         "Select a deployment environment or create a new one (Ex: dev, stage, prod, ...)",
         choices,
     )
+
+    if selected_env_name != CREATE_NEW_ENVIRONMENT:
+        _remember_answers_for(state, selected_env_name)
 
     if selected_env_name == CREATE_NEW_ENVIRONMENT:
         selected_provider_value = interact.select(
@@ -150,6 +169,8 @@ def deploy(ctx: typer.Context):
             "Enter the new environment name",
             validate=_is_a_free_environment_name,
         ).strip()
+        _remember_answers_for(state, selected_env_name)
+
         selected_strategy = interact.select(
             "env.strategy",
             "Select a deployment strategy for the new environment",
@@ -248,10 +269,11 @@ def deploy(ctx: typer.Context):
             "delete.confirm",
             (
                 f"This will delete all infrastructure in the '{selected_env_name}'"
-                " environment. This action cannot be undone. Please type 'DELETE' to confirm."
+                " environment. This action cannot be undone. Please type"
+                f" '{DELETE_CONFIRMATION}' to confirm."
             ),
         )
-        if typed != "DELETE":
+        if typed != DELETE_CONFIRMATION:
             print("[bold yellow]Delete operation cancelled.[/bold yellow]")
             raise typer.Exit()
 

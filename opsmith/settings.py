@@ -22,6 +22,12 @@ class OpsmithSettings(BaseSettings):
     max_dockerfile_gen_attempts: int = 3
     max_docker_compose_gen_attempts: int = 3
 
+    #: Where Opsmith keeps what it remembers about a project: the answers an environment has
+    #: given, the secrets it holds until the environment does, and the steps it has finished.
+    #: Outside the repository, because none of it is authored and some of it must never be
+    #: committed by any means, which an ignore rule cannot promise.
+    state_dir: str = "~/.opsmith"
+
     #: The last place :mod:`opsmith.core.llm` looks for the model, after the option and the
     #: environment.
     model: Optional[str] = None

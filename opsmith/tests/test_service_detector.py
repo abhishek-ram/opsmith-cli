@@ -2,8 +2,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from opsmith.core.answers import AnswerSources
 from opsmith.core.context import OpsmithContext
+from opsmith.core.errors import ManualEditRequired
 from opsmith.core.events import NullSink
+from opsmith.core.interaction import HeadlessInteraction
 from opsmith.service_detector import DockerfileContent, ServiceDetector
 from opsmith.tests.conftest import FakeInteraction, FakeProvisionerFactory
 from opsmith.types import ServiceInfo, ServiceList, ServiceTypeEnum
@@ -195,3 +200,41 @@ def test_the_dockerfile_editor_is_a_fix_editor(tmp_path):
             "on_headless": "fail",
         }
     ]
+
+
+def test_the_dockerfile_editor_stops_a_headless_run_at_the_file_it_wrote(tmp_path):
+    """
+    With nobody to fix it, the loop that reopens the editor would never end. It stops instead,
+    leaving the last attempt at the path it names so that fixing it is a matter of editing that
+    file and running the command again.
+    """
+    response = MagicMock()
+    response.output = DockerfileContent(content="FROM broken\n", give_up=True, reason="stuck")
+    response.new_messages.return_value = []
+    agent = MagicMock()
+    agent.run_sync.return_value = response
+
+    ctx = build_context(agent)
+    ctx.interact = HeadlessInteraction(
+        AnswerSources(), ctx.answers, events=NullSink(), resume="opsmith setup"
+    )
+
+    with patch("opsmith.service_detector.RepoMap"):
+        detector = ServiceDetector(ctx=ctx)
+
+    dockerfile_path = tmp_path / "Dockerfile"
+    with patch.object(detector, "_validate_dockerfile", return_value=(False, "no", None)):
+        with pytest.raises(ManualEditRequired) as raised:
+            detector._generate_and_validate_dockerfile(
+                service=ServiceInfo(
+                    name_slug="api",
+                    language="python",
+                    service_type=ServiceTypeEnum.BACKEND_API,
+                    service_port=8000,
+                ),
+                dockerfile_path_abs=dockerfile_path,
+            )
+
+    assert dockerfile_path.read_text(encoding="utf-8") == "FROM broken\n"
+    assert raised.value.details["path"] == str(dockerfile_path)
+    assert raised.value.details["resume"] == "opsmith setup"

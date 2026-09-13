@@ -12,9 +12,10 @@ import inquirer
 from inquirer import errors as inquirer_errors
 
 from opsmith.cli.output import BaseRenderer
+from opsmith.core.answers import DESTRUCTIVE_ANSWERS, AnswerSources, AnswerStore
 from opsmith.core.errors import InteractionCancelled
 from opsmith.core.events import STEP_INTERACT
-from opsmith.core.interaction import Choice
+from opsmith.core.interaction import Choice, event_data, match_choice, storable
 
 #: Appended to the label of the choice the model, or the code, recommends.
 RECOMMENDED_SUFFIX = " (Recommended)"
@@ -45,29 +46,55 @@ def _adapt_validator(
     return inquirer_validate
 
 
-def _event_data(details: Any) -> Dict:
-    """
-    Shapes an interaction's details into the data an event carries.
-
-    :param details: Whatever the caller attached to the interaction.
-    :return: Keyword data for the event, empty when there is nothing to attach.
-    """
-    if details is None:
-        return {}
-    if isinstance(details, dict):
-        return details
-    return {"details": details}
-
-
 class TerminalInteraction:
     """Asks through ``inquirer``, on the terminal the run was started from."""
 
-    def __init__(self, renderer: BaseRenderer):
+    def __init__(
+        self,
+        renderer: BaseRenderer,
+        *,
+        sources: Optional[AnswerSources] = None,
+        answers: Optional[AnswerStore] = None,
+    ):
         """
         :param renderer: The run's renderer. It is asked to clear anything it is animating
             before a prompt is drawn, and it is where :meth:`notify` reports.
+        :param sources: What the run was told up front. Only ``--yes`` matters on a terminal:
+            somebody who typed it has already confirmed, and should not be asked twice.
+        :param answers: Where an answer is remembered. A person is still asked every question -
+            the store only fills in what the prompt offers, so a re-run after a stop starts from
+            what was already said instead of from nothing.
         """
         self.renderer = renderer
+        self.sources = sources if sources is not None else AnswerSources()
+        self.answers = answers
+
+    def _remembered(self, key: str) -> Any:
+        """
+        :param key: The interaction key.
+        :return: What this environment answered last time, or None.
+        """
+        return self.answers.get(key) if self.answers is not None else None
+
+    def _remember(self, key: str, value: Any, *, secret: bool = False):
+        """
+        Writes an answer through, so a run stopped later never asks for it again.
+
+        :param key: The interaction key that was answered.
+        :param value: The answer, in a form that can be written to a file.
+        :param secret: Whether it must not be written in the clear.
+        """
+        if self.answers is not None:
+            self.answers.record(key, value, secret=secret)
+
+    def _answered_by_yes(self, key: str) -> Any:
+        """
+        :param key: The interaction key.
+        :return: What ``--yes`` answers for this key, or None when it answers nothing.
+        """
+        if self.sources.assume_yes and key in DESTRUCTIVE_ANSWERS:
+            return DESTRUCTIVE_ANSWERS[key]
+        return None
 
     def _prompt(self, key: str, question: Any) -> Any:
         """
@@ -112,6 +139,14 @@ class TerminalInteraction:
         :return: The answer.
         :raises InteractionCancelled: The user interrupted the prompt.
         """
+        supplied = self._answered_by_yes(key)
+        if supplied is not None:
+            return str(supplied)
+
+        if default is None:
+            remembered = self._remembered(key)
+            default = None if remembered is None else str(remembered)
+
         question_class = inquirer.Password if secret else inquirer.Text
         question = question_class(
             key,
@@ -119,7 +154,9 @@ class TerminalInteraction:
             default=default,
             validate=_adapt_validator(validate),
         )
-        return self._prompt(key, question)
+        answer = self._prompt(key, question)
+        self._remember(key, answer, secret=secret)
+        return answer
 
     def select(self, key: str, message: str, choices: List[Choice], *, default: Any = None) -> Any:
         """
@@ -132,8 +169,12 @@ class TerminalInteraction:
         :return: The value of the chosen option.
         :raises InteractionCancelled: The user interrupted the prompt.
         """
-        options = []
         selected = default
+        if selected is None:
+            remembered = match_choice(choices, self._remembered(key))
+            selected = remembered.value if remembered is not None else None
+
+        options = []
         for choice in choices:
             label = choice.label + RECOMMENDED_SUFFIX if choice.recommended else choice.label
             options.append((label, choice.value))
@@ -141,7 +182,12 @@ class TerminalInteraction:
                 selected = choice.value
 
         question = inquirer.List(key, message=message, choices=options, default=selected)
-        return self._prompt(key, question)
+        answer = self._prompt(key, question)
+
+        chosen = match_choice(choices, answer)
+        if chosen is not None:
+            self._remember(key, storable(chosen))
+        return answer
 
     def confirm(
         self, key: str, message: str, *, details: Any = None, default: bool = False
@@ -153,6 +199,28 @@ class TerminalInteraction:
         :param message: The question, in plain text.
         :param details: What the answer is about. A user at a terminal has already been shown
             it, so only a headless run reads this.
+        :param default: The answer taken when the user just presses enter.
+        :return: What they answered.
+        :raises InteractionCancelled: The user interrupted the prompt.
+        """
+        supplied = self._answered_by_yes(key)
+        if supplied is not None:
+            return bool(supplied)
+
+        answer = self._confirm_without_remembering(key, message, default=default)
+        self._remember(key, answer)
+        return answer
+
+    def _confirm_without_remembering(self, key: str, message: str, *, default: bool) -> bool:
+        """
+        Puts a yes or no question without writing the answer to the store.
+
+        :meth:`wait_for` re-checks through a confirmation that shares the wait's key, and what
+        belongs under that key is whether the wait was satisfied - not whether the user wanted to
+        look again.
+
+        :param key: The interaction key, which is also the question's name.
+        :param message: The question, in plain text.
         :param default: The answer taken when the user just presses enter.
         :return: What they answered.
         :raises InteractionCancelled: The user interrupted the prompt.
@@ -207,10 +275,15 @@ class TerminalInteraction:
         :param timeout_s: Ignored here.
         :raises InteractionCancelled: The user stopped waiting.
         """
+        if self._remembered(key) is True:
+            return
+
         while not check():
             self.notify(message, details=details)
-            if not self.confirm(key, "Check again?", details=details, default=True):
+            if not self._confirm_without_remembering(key, "Check again?", default=True):
                 raise InteractionCancelled(key, message)
+
+        self._remember(key, True)
 
     def notify(self, message: str, *, details: Any = None) -> None:
         """
@@ -222,4 +295,4 @@ class TerminalInteraction:
         :param message: What they should know, in plain text.
         :param details: Machine-readable context for a harness reading the run.
         """
-        self.renderer.log(STEP_INTERACT, message, **_event_data(details))
+        self.renderer.log(STEP_INTERACT, message, **event_data(details))

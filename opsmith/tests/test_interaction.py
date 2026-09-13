@@ -1,15 +1,31 @@
-"""Tests for the terminal interaction: how each primitive becomes an inquirer question."""
+"""Tests for the two interactions: the one that prompts, and the one that cannot.
+
+The first half is the terminal implementation - how each primitive becomes an inquirer question.
+The second is the headless one, which answers from what the run was told and stops the run when
+nothing has the answer.
+"""
 
 from pathlib import Path
+from typing import List
 from unittest.mock import patch
 
 import inquirer
 import pytest
+import yaml
 from inquirer import errors as inquirer_errors
 
 from opsmith.cli.interaction import TerminalInteraction
-from opsmith.core.errors import EXIT_CODES, InteractionCancelled
-from opsmith.core.interaction import Choice
+from opsmith.core.answers import AnswerSources, AnswerStore
+from opsmith.core.errors import (
+    EXIT_CODES,
+    InteractionCancelled,
+    InvalidArgument,
+    InvalidConfig,
+    ManualEditRequired,
+    MissingAnswerError,
+    PendingActionError,
+)
+from opsmith.core.interaction import Choice, HeadlessInteraction
 from opsmith.tests.conftest import RecordingSink
 
 
@@ -282,3 +298,394 @@ def test_wait_for_cancels_when_the_user_stops_waiting(interact):
     with patch("opsmith.cli.interaction.inquirer.prompt", prompting(False)):
         with pytest.raises(InteractionCancelled):
             interact.wait_for("dns.confirm", "Create the records", check=lambda: False)
+
+
+# --- the headless interaction ----------------------------------------------------------------
+
+
+class FakeClock:
+    """A clock that only moves when something waits on it.
+
+    Injecting this is what lets a test prove a ten minute timeout in no time at all, and it also
+    means a wait that forgot to sleep would spin forever rather than quietly passing.
+    """
+
+    def __init__(self):
+        self.now = 0.0
+        self.slept: List[float] = []
+
+    def monotonic(self) -> float:
+        """:return: The current reading."""
+        return self.now
+
+    def sleep(self, seconds: float):
+        """
+        :param seconds: How long to wait, which is how far the clock moves.
+        """
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+@pytest.fixture
+def clock() -> FakeClock:
+    """The clock a headless wait reads and moves."""
+    return FakeClock()
+
+
+@pytest.fixture
+def store(tmp_path: Path) -> AnswerStore:
+    """A store bound to an environment, so an answer given is an answer remembered."""
+    store = AnswerStore(tmp_path / ".opsmith")
+    store.use_environment("prod")
+    return store
+
+
+@pytest.fixture
+def headless(renderer: FakeRenderer, store: AnswerStore, clock: FakeClock):
+    """
+    Builds a headless interaction told whatever the test says it was told.
+
+    :return: A factory taking the same options the command line carries.
+    """
+
+    def build(wait_timeout: int = 600, **options) -> HeadlessInteraction:
+        return HeadlessInteraction(
+            AnswerSources(**options),
+            store,
+            events=renderer,
+            wait_timeout=wait_timeout,
+            resume="opsmith deploy",
+            sleep=clock.sleep,
+            monotonic=clock.monotonic,
+        )
+
+    return build
+
+
+REGIONS = [
+    Choice(label="US East (N. Virginia)", value="us-east-1"),
+    Choice(label="EU West (Ireland)", value="eu-west-1", recommended=True),
+]
+
+
+def test_a_headless_run_answers_from_what_it_was_told(headless):
+    """An inline answer is the most direct thing a caller can say, and it is taken as given."""
+    interact = headless(inline={"env.region": "us-east-1"})
+
+    assert interact.ask("env.region", "Which region") == "us-east-1"
+
+
+def test_a_headless_run_remembers_what_it_answered(headless, store: AnswerStore):
+    """
+    The answer is written the moment it is given. A run that stops at the next question has to
+    find this one already answered when it is run again.
+    """
+    interact = headless(inline={"env.region": "us-east-1"})
+    interact.ask("env.region", "Which region")
+
+    assert store.get("env.region") == "us-east-1"
+
+
+def test_a_question_already_answered_is_not_asked_again(headless, store: AnswerStore):
+    """This is the resume: the second invocation is told nothing, and needs to be told nothing."""
+    store.record("env.region", "us-east-1")
+
+    assert headless().ask("env.region", "Which region") == "us-east-1"
+
+
+def test_a_secret_answer_is_remembered_apart(headless, store: AnswerStore):
+    """
+    A value asked for as a secret is routed to the secret half of the store, so it never reaches
+    the file that is meant to be committed.
+    """
+    interact = headless(env_file={"envvar.DATABASE_URL": "postgres://host/db"})
+    interact.ask("envvar.DATABASE_URL", "Enter value for DATABASE_URL", secret=True)
+
+    assert store.get("envvar.DATABASE_URL") == "postgres://host/db"
+    assert yaml.safe_load(store.answers_path.read_text(encoding="utf-8")) in (None, {})
+
+
+def test_a_question_nobody_answered_stops_the_run(headless):
+    """
+    The stop carries everything a driver needs to answer it and try again: the key, the shape of
+    the answer, the variable that would carry it, and the command to run.
+    """
+    with pytest.raises(MissingAnswerError) as raised:
+        headless().ask("env.domain_email", "Enter email for SSL")
+
+    details = raised.value.details
+    assert details["key"] == "env.domain_email"
+    assert details["primitive"] == "ask"
+    assert details["env_var"] == "OPSMITH_ANSWER_ENV_DOMAIN_EMAIL"
+    assert details["resume"] == "opsmith deploy"
+    assert EXIT_CODES[raised.value.code] == 3
+
+
+def test_a_missing_secret_is_not_asked_for_on_a_command_line(headless):
+    """
+    The hint for a secret names the environment variable instead of the flag, because a command
+    line is readable by every process on the machine and lands in a shell history.
+    """
+    with pytest.raises(MissingAnswerError) as raised:
+        headless().ask("envvar.SECRET_KEY", "Enter value for SECRET_KEY", secret=True)
+
+    assert "--answer" not in raised.value.hint
+    assert "OPSMITH_ANSWER_ENVVAR_SECRET_KEY" in raised.value.hint
+    assert raised.value.details["secret"] is True
+
+
+def test_an_option_can_be_chosen_by_its_value_or_by_its_label(headless):
+    """
+    A flag can only ever carry text, and the label is what a person reads in the terminal, so
+    both are ways of naming the same option.
+    """
+    assert (
+        headless(inline={"env.region": "eu-west-1"}).select("env.region", "?", REGIONS)
+        == "eu-west-1"
+    )
+    assert (
+        headless(inline={"env.region": "US East (N. Virginia)"}).select("env.region", "?", REGIONS)
+        == "us-east-1"
+    )
+
+
+def test_an_option_whose_value_is_an_object_can_still_be_chosen_and_remembered(
+    headless, store: AnswerStore
+):
+    """
+    An instance type is a whole model, which no flag could carry and no YAML file should hold. It
+    is named by its label, and the label is what the store keeps.
+    """
+    machines = [
+        Choice(label="t3.small", value={"name": "t3.small", "cpu": 2}),
+        Choice(label="t3.large", value={"name": "t3.large", "cpu": 4}),
+    ]
+    interact = headless(inline={"env.instance_type": "t3.large"})
+
+    chosen = interact.select("env.instance_type", "Which machine", machines)
+
+    assert chosen == {"name": "t3.large", "cpu": 4}
+    assert store.get("env.instance_type") == "t3.large"
+
+
+def test_a_stop_on_a_choice_says_what_the_choices_were(headless):
+    """Otherwise a driver has to guess what it is allowed to say."""
+    with pytest.raises(MissingAnswerError) as raised:
+        headless().select("env.region", "Which region", REGIONS)
+
+    assert raised.value.details["choices"] == [
+        {"label": "US East (N. Virginia)", "value": "us-east-1"},
+        {"label": "EU West (Ireland)", "value": "eu-west-1"},
+    ]
+
+
+def test_an_answer_the_question_refuses_is_a_usage_error(headless):
+    """
+    Reporting a supplied answer as missing would tell the driver to supply what it just supplied,
+    and it would do exactly that, forever.
+    """
+    with pytest.raises(InvalidArgument) as raised:
+        headless(inline={"env.region": "mars-north-1"}).select("env.region", "?", REGIONS)
+
+    assert EXIT_CODES[raised.value.code] == 2
+    assert raised.value.details["source"] == "--answer"
+
+
+def test_an_answer_that_fails_its_own_rule_is_a_usage_error(headless):
+    """The rule a person reads at the prompt is the rule a supplied answer is held to."""
+
+    def must_be_an_email(value):
+        return None if "@" in value else "Enter an email address."
+
+    with pytest.raises(InvalidArgument) as raised:
+        headless(inline={"env.domain_email": "nope"}).ask(
+            "env.domain_email", "Enter email", validate=must_be_an_email
+        )
+
+    assert raised.value.details["problem"] == "Enter an email address."
+
+
+def test_a_remembered_answer_that_no_longer_fits_is_dropped_rather_than_fatal(
+    headless, store: AnswerStore, renderer: FakeRenderer
+):
+    """
+    The store is Opsmith's own. A stale entry in it is not something the person running the
+    command did, so it must not wedge the run with an error they cannot act on.
+    """
+    store.record("env.region", "ap-south-1")
+
+    with pytest.raises(MissingAnswerError):
+        headless().select("env.region", "Which region", REGIONS)
+
+    assert any(event.kind == "warning" for event in renderer.events)
+
+
+def test_accept_defaults_takes_the_recommended_option(headless):
+    """The recommendation is the code's own answer, which is what a default is."""
+    interact = headless(accept_defaults=True)
+
+    assert interact.select("env.region", "Which region", REGIONS) == "eu-west-1"
+
+
+def test_accept_defaults_does_not_invent_an_answer_nobody_offered(headless):
+    """
+    With no default and no recommendation there is nothing to accept, and picking the first
+    option would be Opsmith choosing a region for somebody.
+    """
+    plain = [Choice(label="a", value="a"), Choice(label="b", value="b")]
+
+    with pytest.raises(MissingAnswerError):
+        headless(accept_defaults=True).select("env.region", "Which region", plain)
+
+
+def test_yes_answers_the_confirmation_that_guards_an_update(headless):
+    """`--yes` is how somebody says in advance that they accept what the run is about to change."""
+    assert headless(assume_yes=True).confirm("update.confirm_infra_changes", "Continue?") is True
+
+
+def test_yes_types_the_word_the_deletion_gate_asks_for(headless):
+    """
+    On a terminal the gate asks for a word to be typed, and that friction stays. `--yes` is what
+    stands in for the typing when there is nobody to type.
+    """
+    assert headless(assume_yes=True).ask("delete.confirm", "Type DELETE") == "DELETE"
+
+
+def test_accept_defaults_does_not_agree_to_something_destructive(headless):
+    """
+    Taking a default is a statement that the ordinary answer will do. Destroying an environment
+    has no ordinary answer.
+    """
+    with pytest.raises(MissingAnswerError):
+        headless(accept_defaults=True).confirm(
+            "update.confirm_infra_changes", "Continue?", default=True
+        )
+
+
+def test_a_destructive_confirmation_is_never_remembered(headless, store: AnswerStore):
+    """Otherwise every later run would destroy without being asked."""
+    headless(assume_yes=True).confirm("update.confirm_infra_changes", "Continue?")
+
+    assert store.get("update.confirm_infra_changes") is None
+
+
+def test_a_review_editor_accepts_what_was_proposed(headless):
+    """There is nobody to review it, and the proposal is what the model actually suggested."""
+    assert (
+        headless().edit("infra_deps.confirm", "Review", content="a: 1", on_headless="accept")
+        == "a: 1"
+    )
+
+
+def test_a_review_editor_asked_twice_stops_instead_of_looping(headless):
+    """
+    Being asked again means what was accepted did not parse. Accepting it a second time would not
+    parse either, and the caller's loop would never end - which is worse than stopping.
+    """
+    interact = headless()
+    interact.edit("infra_deps.confirm", "Review", content="not valid", on_headless="accept")
+
+    with pytest.raises(InvalidConfig):
+        interact.edit("infra_deps.confirm", "Review", content="not valid", on_headless="accept")
+
+
+def test_a_fix_editor_leaves_the_document_where_it_says_it_did(headless, tmp_path: Path):
+    """
+    The stop tells somebody to edit a file, so the file has to be there and has to hold the last
+    thing the model produced - otherwise there is nothing to edit.
+    """
+    path = tmp_path / "docker" / "api" / "Dockerfile"
+
+    with pytest.raises(ManualEditRequired) as raised:
+        headless().edit(
+            "dockerfile.edit",
+            "Fix the Dockerfile",
+            content="FROM python:3.13\n",
+            path=path,
+            on_headless="fail",
+        )
+
+    assert path.read_text(encoding="utf-8") == "FROM python:3.13\n"
+    assert raised.value.details["path"] == str(path)
+    assert EXIT_CODES[raised.value.code] == 4
+
+
+def test_a_wait_that_is_already_satisfied_does_not_wait(headless, clock: FakeClock):
+    """The records were created before the command ran, which is the happy case for a re-run."""
+    headless().wait_for("dns.api", "Create the record", check=lambda: True)
+
+    assert clock.slept == []
+
+
+def test_a_wait_polls_until_the_thing_has_been_done(headless, clock: FakeClock):
+    """It is somebody else's action, and it takes as long as it takes."""
+    attempts = []
+
+    def check():
+        attempts.append(clock.now)
+        return len(attempts) >= 3
+
+    headless().wait_for("dns.api", "Create the record", check=check)
+
+    assert len(attempts) == 3
+    assert clock.slept  # it waited between them rather than spinning
+
+
+def test_a_wait_that_times_out_says_what_is_still_missing(headless, clock: FakeClock):
+    """
+    Exit 8 is a different instruction from exit 3: nobody has to supply an answer, somebody has
+    to go and do something, and then run the same command again.
+    """
+    records = [{"type": "A", "name": "api.example.test", "value": "203.0.113.10"}]
+
+    with pytest.raises(PendingActionError) as raised:
+        headless(wait_timeout=60).wait_for(
+            "dns.api",
+            "Create the record",
+            check=lambda: False,
+            details={"records": records},
+        )
+
+    assert EXIT_CODES[raised.value.code] == 8
+    assert raised.value.details["records"] == records
+    assert raised.value.details["resume"] == "opsmith deploy"
+    assert raised.value.details["waited_s"] >= 60
+
+
+def test_a_wait_already_satisfied_once_is_not_polled_again(headless, store: AnswerStore):
+    """
+    A run that stopped later and was run again should not go back to the network to re-establish
+    something it already established.
+    """
+    store.record("dns.api", True)
+    checked = []
+
+    headless().wait_for("dns.api", "Create the record", check=lambda: checked.append(1))
+
+    assert checked == []
+
+
+def test_a_wait_the_caller_bounds_is_never_given_longer_than_the_run_allows(
+    headless, clock: FakeClock
+):
+    """`--wait-timeout` is the ceiling; a caller with its own opinion may only be stricter."""
+    with pytest.raises(PendingActionError) as raised:
+        headless(wait_timeout=30).wait_for(
+            "dns.api", "Create the record", check=lambda: False, timeout_s=600
+        )
+
+    assert raised.value.details["timeout_s"] == 30
+
+
+def test_what_the_run_tells_the_user_is_kept_for_the_report(headless):
+    """
+    With nobody watching the terminal, a notice still has to reach whoever reads the run - so it
+    is both an event and something the result can carry.
+    """
+    interact = headless()
+    interact.notify("Your site is live", details={"next_steps": ["point your domain at it"]})
+
+    assert interact.notices == [
+        {"message": "Your site is live", "details": {"next_steps": ["point your domain at it"]}}
+    ]
+    assert interact.next_steps == [["point your domain at it"]]

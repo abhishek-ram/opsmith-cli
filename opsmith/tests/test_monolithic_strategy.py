@@ -24,8 +24,15 @@ from opsmith.cloud_providers.base import (
     MachineType,
     MachineTypeList,
 )
+from opsmith.core.answers import AnswerSources, AnswerStore
 from opsmith.core.context import OpsmithContext
-from opsmith.core.errors import AnsibleFailed
+from opsmith.core.errors import (
+    EXIT_CODES,
+    AnsibleFailed,
+    MissingAnswerError,
+    PendingActionError,
+)
+from opsmith.core.interaction import HeadlessInteraction
 from opsmith.deployment_strategies.monolithic import (
     DockerComposeContent,
     DockerComposeLogValidation,
@@ -43,6 +50,7 @@ from opsmith.types import (
     DeploymentEnvironment,
     DomainInfo,
     EnvVarConfig,
+    FrontendCDNState,
     InfrastructureDependency,
     InfrastructureProviderEnum,
     ServiceInfo,
@@ -189,6 +197,14 @@ def provisioners() -> FakeProvisionerFactory:
                 "user": "ubuntu",
                 "instance_id": "i-0123456789",
             },
+            "frontend_bucket_cert": {
+                "bucket_name": "acme-app-www",
+                "certificate_id": "cert-123",
+            },
+            "frontend_cdn": {
+                "cdn_domain_name": "d123.cloudfront.test",
+                "cdn_distribution_id": "E123",
+            },
         },
         ansible_outputs={
             "docker_build_push": {"image_url": IMAGE_URL},
@@ -200,6 +216,7 @@ def provisioners() -> FakeProvisionerFactory:
                 "fetched_files": _fetched_files(ENV_FILE_CONTENT, COMPOSE_CONTENT)
             },
             "docker_compose_run": {},
+            "frontend_deploy": {},
         },
     )
 
@@ -602,21 +619,302 @@ def test_deploy_asks_the_user_through_the_interaction_api(
     strategy, deployment_config, environment, interact
 ):
     """
-    A deploy asks three things: which machine to run on, whether the DNS records exist, and
-    what each configured environment variable should hold. Each one carries the key a headless
-    run answers it by, and the default the code offered.
+    A deploy asks three things: which machine to run on, that the DNS record now exists, and what
+    each configured environment variable should hold. Each one carries the key a headless run
+    answers it by, and the default the code offered.
+
+    The DNS step is a wait rather than a question, and it is keyed on the record rather than on
+    the service, because one service can need two records that have nothing to do with each other.
     """
     strategy.deploy(deployment_config, environment)
 
     assert [(entry["primitive"], entry["key"]) for entry in interact.asked] == [
         ("select", "env.instance_type"),
-        ("confirm", "dns.confirm"),
+        ("wait_for", "dns.api-example-test"),
         ("ask", "envvar.DATABASE_URL"),
     ]
 
-    machine, dns, env_var = interact.asked
+    machine, dns_wait, env_var = interact.asked
     assert [choice.value for choice in machine["choices"]] == [SMALL_MACHINE, LARGE_MACHINE]
-    assert dns["details"] == {
+    assert dns_wait["details"] == {
         "records": [{"type": "A", "name": "api.example.test", "value": "203.0.113.10"}]
     }
     assert env_var["default"] == "postgres://localhost/app"
+
+
+# --- a deployment nobody is watching -----------------------------------------------------
+
+
+FRONTEND_SLUG = "react_web_1"
+
+
+@pytest.fixture
+def headless_ctx(ctx: OpsmithContext, events: RecordingSink):
+    """
+    Rebuilds the context around a real headless interaction over a real answer store.
+
+    A fake interaction answering with the code's own defaults would prove nothing about a run
+    with nobody at the keyboard, because the fake is the thing being replaced. This builds the
+    real one, told only what the test says the run was told.
+    """
+
+    def build(wait_timeout: int = 600, **options) -> OpsmithContext:
+        if not ctx.answers.bound:
+            ctx.answers.use_environment("prod")
+        ctx.interact = HeadlessInteraction(
+            AnswerSources(**options),
+            ctx.answers,
+            events=events,
+            wait_timeout=wait_timeout,
+            resume="opsmith deploy",
+            sleep=lambda seconds: None,
+            monotonic=_a_clock_that_runs_out(),
+        )
+        return ctx
+
+    return build
+
+
+def _a_clock_that_runs_out():
+    """
+    :return: A clock that jumps an hour every time it is read, so a wait reaches its timeout
+        without any test taking an hour.
+    """
+    elapsed = {"now": 0.0}
+
+    def monotonic() -> float:
+        now = elapsed["now"]
+        elapsed["now"] += 3600.0
+        return now
+
+    return monotonic
+
+
+def _headless_strategy(context: OpsmithContext) -> MonolithicDeploymentStrategy:
+    """
+    :param context: The context to build the strategy against.
+    :return: The strategy, with the SSH key lookup stubbed out as elsewhere.
+    """
+    strategy = MonolithicDeploymentStrategy(context)
+    strategy._get_ssh_public_key = lambda: "ssh-ed25519 AAAAfake test@opsmith"
+    return strategy
+
+
+def test_a_deploy_told_everything_needs_nobody(headless_ctx, deployment_config, environment):
+    """
+    Given every answer up front, a deploy runs end to end without a terminal. This is the whole
+    point of the part: the flow is unchanged, and only where the answers come from is different.
+    """
+    context = headless_ctx(
+        inline={"env.instance_type": "t4g.medium"},
+        env_file={"envvar.DATABASE_URL": "postgres://supplied/db"},
+    )
+
+    _headless_strategy(context).deploy(deployment_config, environment)
+
+    state = yaml.safe_load(
+        (context.deployments_path / "environments" / "prod" / "state.yml").read_text()
+    )
+    assert state["registry_url"] == REGISTRY_URL
+    assert state["virtual_machine"]["public_ip"] == "203.0.113.10"
+
+
+def test_a_supplied_environment_value_is_what_gets_deployed(
+    headless_ctx, deployment_config, environment, provisioners
+):
+    """
+    The value the run was told beats the one the model invented, which matters most for the
+    secrets among them: the model regenerates the file on every attempt.
+    """
+    context = headless_ctx(
+        inline={"env.instance_type": "t4g.medium"},
+        env_file={"envvar.DATABASE_URL": "postgres://supplied/db"},
+    )
+
+    _headless_strategy(context).deploy(deployment_config, environment)
+
+    compose = provisioners.find("run_playbook", "docker_compose_deploy")
+    assert compose["extra_vars"]["env_file_content"] == 'DATABASE_URL="postgres://supplied/db"'
+
+
+def test_a_deploy_missing_one_answer_says_which_one(headless_ctx, deployment_config, environment):
+    """
+    Nothing named the instance type, so the run stops there rather than choosing a machine for
+    somebody - and it names the key, which is all a driver needs to answer it and run again.
+    """
+    context = headless_ctx(env_file={"envvar.DATABASE_URL": "postgres://supplied/db"})
+
+    with pytest.raises(MissingAnswerError) as raised:
+        _headless_strategy(context).deploy(deployment_config, environment)
+
+    assert raised.value.details["key"] == "env.instance_type"
+
+
+def test_a_deploy_waits_for_dns_and_stops_when_it_never_appears(
+    headless_ctx, deployment_config, environment, dns
+):
+    """
+    Nobody created the records, so the run stops with them rather than failing: that is a
+    different instruction from a missing answer, and exit 8 is how it says so.
+    """
+    dns.publish_nothing()
+    context = headless_ctx(
+        inline={"env.instance_type": "t4g.medium"},
+        env_file={"envvar.DATABASE_URL": "postgres://supplied/db"},
+        wait_timeout=60,
+    )
+
+    with pytest.raises(PendingActionError) as raised:
+        _headless_strategy(context).deploy(deployment_config, environment)
+
+    assert EXIT_CODES[raised.value.code] == 8
+    assert raised.value.details["records"] == [
+        {"type": "A", "name": "api.example.test", "value": "203.0.113.10"}
+    ]
+
+
+def test_creating_the_records_lets_the_next_run_finish(
+    headless_ctx, deployment_config, environment, dns
+):
+    """
+    The resume: perform the action, run the same command again, and it carries on from the wait
+    without asking for anything it was already told.
+    """
+    dns.publish_nothing()
+    answers = dict(
+        inline={"env.instance_type": "t4g.medium"},
+        env_file={"envvar.DATABASE_URL": "postgres://supplied/db"},
+        wait_timeout=60,
+    )
+    context = headless_ctx(**answers)
+
+    with pytest.raises(PendingActionError):
+        _headless_strategy(context).deploy(deployment_config, environment)
+
+    dns.publish({"type": "A", "name": "api.example.test", "value": "203.0.113.10"})
+    context = headless_ctx(**answers)
+
+    _headless_strategy(context).deploy(deployment_config, environment)
+
+    assert (context.deployments_path / "environments" / "prod" / "state.yml").exists()
+
+
+def test_a_run_stopped_at_the_wait_keeps_the_answers_it_already_had(
+    headless_ctx, deployment_config, environment, dns
+):
+    """
+    The answers were written the moment they were given, so an invocation told nothing at all
+    still has them - which is what stops the driver loop from asking twice.
+    """
+    dns.publish_nothing()
+    context = headless_ctx(
+        inline={"env.instance_type": "t4g.medium"},
+        env_file={"envvar.DATABASE_URL": "postgres://supplied/db"},
+        wait_timeout=60,
+    )
+
+    with pytest.raises(PendingActionError):
+        _headless_strategy(context).deploy(deployment_config, environment)
+
+    fresh = AnswerStore(context.answers.root)
+    fresh.use_environment("prod")
+    assert fresh.get("env.instance_type") == "t4g.medium"
+
+    # The wait is where it stopped, so that is the one thing it has not established yet.
+    assert fresh.get("dns.api-example-test") is None
+
+
+# --- secrets stay out of the state file ---------------------------------------------------
+
+
+@pytest.fixture
+def frontend_config(deployment_config: DeploymentConfig) -> DeploymentConfig:
+    """The same application, plus a frontend whose build needs a secret."""
+    deployment_config.services.append(
+        ServiceInfo(
+            name_slug=FRONTEND_SLUG,
+            language="javascript",
+            service_type=ServiceTypeEnum.FRONTEND,
+            build_cmd="npm run build",
+            build_dir="dist",
+            build_path=".",
+            env_vars=[
+                EnvVarConfig(key="VITE_API_URL", is_secret=False, default_value="https://api"),
+                EnvVarConfig(key="VITE_ANALYTICS_TOKEN", is_secret=True, default_value=None),
+            ],
+        )
+    )
+    return deployment_config
+
+
+@pytest.fixture
+def frontend_environment(
+    frontend_config: DeploymentConfig, environment: DeploymentEnvironment
+) -> DeploymentEnvironment:
+    """The production environment, with a domain for the frontend as well as the API."""
+    environment.domains.append(
+        DomainInfo(service_name_slug=FRONTEND_SLUG, domain_name="www.example.test")
+    )
+    return environment
+
+
+def test_a_build_time_secret_reaches_the_build_and_nowhere_else(
+    headless_ctx, frontend_config, frontend_environment, provisioners
+):
+    """
+    The build needs the token, so it goes to the playbook - in a file, not on a command line.
+    What it must not do is end up in `state.yml`, which is committed, which is where an older
+    Opsmith put it.
+    """
+    context = headless_ctx(
+        inline={
+            "env.instance_type": "t4g.medium",
+            "build_env.react_web_1.VITE_API_URL": "https://api.example.test",
+        },
+        env_file={"envvar.DATABASE_URL": "postgres://supplied/db"},
+        environ={"OPSMITH_ANSWER_BUILD_ENV_REACT_WEB_1_VITE_ANALYTICS_TOKEN": "tok-secret"},
+    )
+
+    _headless_strategy(context).deploy(frontend_config, frontend_environment)
+
+    build = provisioners.find("run_playbook", FRONTEND_SLUG)
+    assert build["extra_vars"]["build_env_vars"] == {
+        "VITE_API_URL": "https://api.example.test",
+        "VITE_ANALYTICS_TOKEN": "tok-secret",
+    }
+
+    state_file = context.deployments_path / "environments" / "prod" / "state.yml"
+    answers_file = context.answers.answers_path
+    assert "tok-secret" not in state_file.read_text(encoding="utf-8")
+    assert "tok-secret" not in answers_file.read_text(encoding="utf-8")
+
+    # And nothing remembered was written into the repository at all.
+    assert not answers_file.is_relative_to(context.deployments_path)
+
+
+def test_an_older_state_file_hands_its_build_values_over_rather_than_losing_them(
+    headless_ctx, frontend_config, frontend_environment, provisioners
+):
+    """
+    An environment deployed before this change has the values in `state.yml`. They are read once,
+    so nobody is asked for them again, and the state file never carries them forward.
+    """
+    context = headless_ctx(
+        inline={"env.instance_type": "t4g.medium"},
+        env_file={"envvar.DATABASE_URL": "postgres://supplied/db"},
+    )
+    strategy = _headless_strategy(context)
+
+    legacy = FrontendCDNState(
+        service_name_slug=FRONTEND_SLUG,
+        domain_name="www.example.test",
+        bucket_name="acme-app-www",
+        build_env_vars={"VITE_API_URL": "https://old", "VITE_ANALYTICS_TOKEN": "old-token"},
+    )
+
+    collected = strategy._prompt_for_build_env_vars(
+        frontend_config.services[-1], existing_vars=legacy.build_env_vars
+    )
+
+    assert collected == {"VITE_API_URL": "https://old", "VITE_ANALYTICS_TOKEN": "old-token"}
+    assert "old-token" not in yaml.dump(legacy.model_dump(mode="json"))

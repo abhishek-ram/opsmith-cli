@@ -125,6 +125,8 @@ class BaseDeploymentStrategy(abc.ABC):
         self.events = ctx.events
         self.provisioners = ctx.provisioner_factory
         self.interact = ctx.interact
+        self.answers = ctx.answers
+        self.steps = ctx.steps
         self.agent = ctx.agent
         self.agent_deps = AgentDeps(src_dir=ctx.src_dir)
         self.src_dir = ctx.src_dir
