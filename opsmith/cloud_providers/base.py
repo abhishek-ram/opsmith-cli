@@ -1,12 +1,14 @@
 import abc
 from enum import Enum
 from importlib.metadata import entry_points
-from typing import TYPE_CHECKING, Dict, List, Optional, Type
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Type
 
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
+from opsmith.core.errors import InvalidArgument
 from opsmith.core.events import STEP_REGISTRY, BufferingSink
 from opsmith.core.interaction import Choice
+from opsmith.core.questions import Question
 
 if TYPE_CHECKING:
     from opsmith.core.context import OpsmithContext
@@ -66,6 +68,18 @@ class BaseCloudProviderDetail(BaseModel):
     region: str = Field(..., description="The cloud provider region for this environment.")
 
 
+class AccountInfo(BaseModel):
+    """What detecting a cloud account found, before anybody has been asked anything.
+
+    It is the provider's own: AWS puts an account id and the path to a plugin here, GCP puts the
+    credentials it authenticated with. None of it is written down - it may hold a live SDK object,
+    and it is rebuilt on every run - so nothing here reaches ``deployments.yml``.
+    :meth:`BaseCloudProvider.build_detail` is what produces the detail that does.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+
 class CloudProviderRegistry:
     """A singleton registry for cloud providers."""
 
@@ -91,9 +105,21 @@ class CloudProviderRegistry:
         self._providers[provider_class.name()] = provider_class
 
     def get_provider_class(self, provider_name: str) -> Type["BaseCloudProvider"]:
-        """Retrieves a provider class from the registry."""
+        """
+        Retrieves a provider class from the registry.
+
+        :param provider_name: The name the configuration or ``--provider`` gave.
+        :return: The provider class.
+        :raises InvalidArgument: No provider is registered under that name. A usage error rather
+            than a ValueError, because the name usually came off a flag and a driver reading the
+            envelope needs the names that would have worked.
+        """
         if provider_name not in self._providers:
-            raise ValueError(f"Provider '{provider_name}' not found.")
+            raise InvalidArgument(
+                f"There is no cloud provider named '{provider_name}'.",
+                hint="Install its plugin, or use one of the providers listed in the details.",
+                details={"provider": provider_name, "known": sorted(self._providers)},
+            )
         return self._providers[provider_name]
 
     @property
@@ -159,12 +185,48 @@ class BaseCloudProvider(abc.ABC):
 
     @classmethod
     @abc.abstractmethod
-    def get_account_details(cls, ctx: "OpsmithContext") -> "BaseCloudProviderDetail":
+    def detect_account(cls, ctx: "OpsmithContext") -> "AccountInfo":
         """
-        Retrieves structured account details for the cloud provider.
+        Finds out what it can about the account, without asking anybody anything.
 
-        :param ctx: The run's context, for reporting progress while the provider is queried.
-            Part 0d also asks this method's questions through ``ctx.interact``.
+        This is where a provider checks that it has credentials and reads the facts that are not
+        a matter of choice - the account id, the path to a helper it needs. It must not interact:
+        ``opsmith env plan`` calls it to enrich its report, and a plan that prompted would not be
+        a plan.
+
+        :param ctx: The run's context, for reporting the wait on the provider's API.
+        :return: What was found, in whatever shape this provider builds a detail from.
+        :raises CloudCredentialsError: The account could not be reached.
+        """
+        raise NotImplementedError
+
+    @classmethod
+    def questions(cls) -> List[Question]:
+        """
+        Declares what this provider needs a person to choose, without asking it.
+
+        Declaring is optional. A provider that returns nothing here still works: it asks whatever
+        it needs through ``ctx.interact`` inside :meth:`build_detail`, and the only thing it gives
+        up is being reported by ``opsmith env plan``, which says its list is partial.
+
+        :return: The questions, in the order they should be asked. A question whose options
+            depend on an earlier answer declares that with ``depends_on``.
+        """
+        return []
+
+    @classmethod
+    @abc.abstractmethod
+    def build_detail(
+        cls, ctx: "OpsmithContext", account: "AccountInfo", answers: Mapping[str, Any]
+    ) -> "BaseCloudProviderDetail":
+        """
+        Assembles what the environment records about this provider.
+
+        :param ctx: The run's context. A provider that declared no questions asks them here,
+            through ``ctx.interact``.
+        :param account: What :meth:`detect_account` found.
+        :param answers: The answers to :meth:`questions`, by interaction key.
+        :return: The detail that is written to ``deployments.yml``.
         """
         raise NotImplementedError
 

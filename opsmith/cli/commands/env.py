@@ -1,10 +1,13 @@
-"""`opsmith env list|create|status`: the environments a repository declares.
+"""`opsmith env list|plan|create|status`: the environments a repository declares.
 
-``list`` and ``status`` read the repository and nothing else - no cloud call, no terraform, no
-docker - so they declare no external tools and answer on a machine that has none installed.
-``create`` is the headless way to make an environment, which the interactive menu cannot be.
+``list``, ``plan`` and ``status`` read the repository and nothing else - no terraform, no docker -
+so they declare no external tools and answer on a machine that has none installed. ``plan`` will
+*read* from a cloud where it can, to list the regions an account actually has, but it is written
+so that failing to do so costs it nothing but the listing. ``create`` is the headless way to make
+an environment, which the interactive menu cannot be.
 """
 
+from pathlib import Path
 from typing import List, Optional
 
 import typer
@@ -14,10 +17,13 @@ from opsmith.cli.commands import requires
 from opsmith.cli.output import OutputFormat
 from opsmith.cli.state import CliState
 from opsmith.core import operations
+from opsmith.core.answers import AnswerSources
 from opsmith.core.results import (
     EnvCreateResult,
     EnvListResult,
+    EnvPlanResult,
     EnvStatusResult,
+    PlannedQuestion,
     Resource,
 )
 
@@ -102,6 +108,152 @@ def _rendered_status(result: EnvStatusResult) -> str:
     for slug, url in result.urls.items():
         lines.append(f"  {slug}: {url}")
     return "\n".join(lines)
+
+
+def _rendered_question(question: PlannedQuestion) -> List[str]:
+    """
+    Lays one question out for a terminal, as the thing to type to answer it.
+
+    :param question: One answer the run is going to need.
+    :return: The lines describing it.
+    """
+    lines = [f"  --answer {question.key}=<value>"]
+    if question.secret:
+        lines[0] = f"  {question.env_var}=<value>   (a secret: keep it off the command line)"
+
+    lines.append(f"      {question.message}")
+    if question.default is not None:
+        lines.append(f"      default: {question.default}")
+    if question.choices:
+        offered = ", ".join(option.value for option in question.choices)
+        lines.append(f"      one of: {offered}")
+    if question.asked_by:
+        lines.append(f"      asked by: {question.asked_by}")
+    return lines
+
+
+def _rendered_plan(result: EnvPlanResult) -> str:
+    """
+    Lays a plan out for a terminal: what has to be answered, then what is already settled.
+
+    :param result: What the operation worked out.
+    :return: The report, as plain text.
+    """
+    lines = []
+    if result.environment:
+        lines.append(f"Environment:  {result.environment}")
+    lines.append(f"Provider:     {result.provider or 'not chosen'}")
+    lines.append(f"Strategy:     {result.strategy or 'not chosen'}")
+    lines.append("")
+
+    required = [question for question in result.answers_needed if question.required]
+    optional = [question for question in result.answers_needed if not question.required]
+
+    if required:
+        lines.append(f"{len(required)} answer(s) needed:")
+        for question in required:
+            lines.extend(_rendered_question(question))
+    else:
+        lines.append("Nothing left to answer.")
+
+    if optional:
+        lines.append("")
+        lines.append(f"{len(optional)} answer(s) that would be taken from their defaults:")
+        for question in optional:
+            lines.extend(_rendered_question(question))
+
+    if result.answers_known:
+        lines.append("")
+        lines.append(f"Already answered: {', '.join(sorted(result.answers_known))}")
+
+    if result.blocked_on:
+        lines.append("")
+        lines.append(
+            "Answer these first, then run the plan again to see what they open up: "
+            + ", ".join(result.blocked_on)
+        )
+
+    if not result.complete:
+        lines.append("")
+        lines.append("This list is partial:")
+        lines.extend(f"  - {reason}" for reason in result.partial_reasons)
+
+    if result.answers_file:
+        lines.append("")
+        lines.append(f"Answers skeleton written to {result.answers_file}.")
+
+    return "\n".join(lines)
+
+
+def plan(
+    ctx: typer.Context,
+    name: Optional[str] = typer.Option(None, "--name", help="The environment being planned."),
+    provider: Optional[str] = typer.Option(
+        None, "--provider", help="The cloud provider to deploy to, such as AWS or GCP."
+    ),
+    region: Optional[str] = typer.Option(None, "--region", help="The region to deploy into."),
+    strategy: Optional[str] = typer.Option(
+        None, "--strategy", help="The deployment strategy, such as Monolithic."
+    ),
+    project_id: Optional[str] = typer.Option(
+        None, "--project-id", help="The GCP project to deploy into."
+    ),
+    zone: Optional[str] = typer.Option(None, "--zone", help="The GCP zone to deploy into."),
+    instance_type: Optional[str] = typer.Option(
+        None, "--instance-type", help="The instance type to create, instead of the one suggested."
+    ),
+    domain: Optional[List[str]] = typer.Option(
+        None, "--domain", help="A service's domain, as slug=host. Repeatable.", metavar="SLUG=HOST"
+    ),
+    domain_email: Optional[str] = typer.Option(
+        None, "--domain-email", help="The email SSL certificates are registered with."
+    ),
+    env_var: Optional[List[str]] = typer.Option(
+        None, "--env-var", help="A runtime value, as KEY=VALUE. Repeatable.", metavar="KEY=VALUE"
+    ),
+    build_env: Optional[List[str]] = typer.Option(
+        None,
+        "--build-env",
+        help="A frontend's build-time value, as slug:KEY=VALUE. Repeatable.",
+        metavar="SLUG:KEY=VALUE",
+    ),
+    write_answers: Optional[Path] = typer.Option(
+        None,
+        "--write-answers",
+        help="Write an answers skeleton to this file, to fill in and pass back with --answers.",
+        metavar="FILE",
+    ),
+) -> EnvPlanResult:
+    """Report every answer creating an environment will need, without creating anything."""
+    state: CliState = ctx.obj
+    flags.supply(
+        state,
+        scalars={
+            "--name": name,
+            "--provider": provider,
+            "--region": region,
+            "--strategy": strategy,
+            "--project-id": project_id,
+            "--zone": zone,
+            "--instance-type": instance_type,
+            "--domain-email": domain_email,
+        },
+        domains=domain,
+        env_vars=env_var,
+        build_envs=build_env,
+    )
+
+    deployment_config = operations.load_config(state.context)
+    result = operations.plan_environment(
+        state.context,
+        deployment_config,
+        sources=state.sources if state.sources is not None else AnswerSources(),
+        write_answers=write_answers,
+    )
+
+    if state.output is OutputFormat.TEXT:
+        state.renderer.render_document(_rendered_plan(result))
+    return result
 
 
 def list_environments(ctx: typer.Context) -> EnvListResult:

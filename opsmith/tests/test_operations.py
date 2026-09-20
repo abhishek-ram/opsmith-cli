@@ -10,7 +10,7 @@ import ast
 import io
 import json
 from pathlib import Path
-from typing import Literal, Type
+from typing import List, Literal, Type
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -26,6 +26,7 @@ from opsmith.cli.interaction import TerminalInteraction
 from opsmith.cli.output import TextRenderer
 from opsmith.cloud_providers import CLOUD_PROVIDER_REGISTRY
 from opsmith.cloud_providers.base import (
+    AccountInfo,
     BaseCloudProvider,
     BaseCloudProviderDetail,
     MachineTypeList,
@@ -35,6 +36,7 @@ from opsmith.core.answers import DELETE_CONFIRMATION, AnswerSources
 from opsmith.core.context import OpsmithContext
 from opsmith.core.errors import InvalidArgument, InvalidConfig, UnknownService
 from opsmith.core.interaction import HeadlessInteraction
+from opsmith.core.questions import Question
 from opsmith.core.results import (
     DestroyResult,
     EnvCreateResult,
@@ -106,10 +108,26 @@ class RecordingCloudProvider(BaseCloudProvider):
         return RecordingCloudDetail
 
     @classmethod
-    def get_account_details(cls, ctx: OpsmithContext) -> RecordingCloudDetail:
-        """Returns fixed account details, asking the region the way a real provider would."""
-        region = ctx.interact.ask("env.region", "Select a region", default="us-test-1")
-        return RecordingCloudDetail(region=region)
+    def detect_account(cls, ctx: OpsmithContext) -> AccountInfo:
+        """Reaches no cloud, which is the whole point of detection being its own step."""
+        return AccountInfo()
+
+    @classmethod
+    def questions(cls) -> List[Question]:
+        """Declares the region, the way a real provider does."""
+        return [
+            Question(
+                key="env.region",
+                message="Select a region",
+                asked_by=cls.name(),
+                default="us-test-1",
+            ),
+        ]
+
+    @classmethod
+    def build_detail(cls, ctx, account, answers) -> RecordingCloudDetail:
+        """Builds the detail from the answer to the one question this provider declares."""
+        return RecordingCloudDetail(region=answers["env.region"])
 
     def get_instance_types(self) -> MachineTypeList:
         """No machine types: nothing in these tests sizes a machine."""

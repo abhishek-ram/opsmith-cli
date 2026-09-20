@@ -13,23 +13,39 @@ Nothing here knows about a terminal. Questions go through ``ctx.interact``, prog
 ``ctx.events``, and what a run stopped for is the caller's problem, not this module's.
 """
 
+from dataclasses import replace
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, Type
 
 import yaml
 
 from opsmith.cloud_providers import CLOUD_PROVIDER_REGISTRY
-from opsmith.core.answers import DELETE_CONFIRMATION
+from opsmith.cloud_providers.base import BaseCloudProvider, BaseCloudProviderDetail
+from opsmith.core.answers import DELETE_CONFIRMATION, AnswerSources
 from opsmith.core.config import ConfigIssue, parse_infra_deps, parse_service
 from opsmith.core.context import OpsmithContext
-from opsmith.core.errors import InvalidArgument, InvalidConfig, UnknownService
+from opsmith.core.errors import (
+    InvalidArgument,
+    InvalidConfig,
+    OpsmithError,
+    UnknownService,
+)
 from opsmith.core.events import STEP_CONFIG, STEP_DETECT, STEP_DNS, STEP_SETUP
 from opsmith.core.interaction import Choice
+from opsmith.core.questions import (
+    Question,
+    Resolution,
+    Variant,
+    ask_all,
+    evaluate,
+    skeleton,
+)
 from opsmith.core.results import (
     DestroyResult,
     EnvCreateResult,
     EnvironmentSummary,
     EnvListResult,
+    EnvPlanResult,
     EnvStatusResult,
     InitResult,
     OperationResult,
@@ -46,6 +62,7 @@ from opsmith.types import (
     DeploymentConfig,
     DeploymentEnvironment,
     DomainInfo,
+    ServiceInfo,
     ServiceTypeEnum,
 )
 from opsmith.utils import slugify
@@ -416,6 +433,115 @@ def select_environment(ctx: OpsmithContext, deployment_config: DeploymentConfig)
     )
 
 
+def services_needing_domains(
+    deployment_config: DeploymentConfig,
+    environment: Optional[DeploymentEnvironment] = None,
+) -> List[ServiceInfo]:
+    """
+    Finds the services that answer requests at a domain and do not have one yet.
+
+    :param deployment_config: What the repository deploys.
+    :param environment: The environment being created or updated, when one already exists.
+    :return: The services still to be given a domain, in configuration order.
+    """
+    configured = (
+        {domain.service_name_slug for domain in environment.domains} if environment else set()
+    )
+    return [
+        service
+        for service in deployment_config.services
+        if service.service_type in ROUTED_SERVICE_TYPES and service.name_slug not in configured
+    ]
+
+
+def domain_questions(
+    deployment_config: DeploymentConfig,
+    environment: Optional[DeploymentEnvironment] = None,
+) -> List[Question]:
+    """
+    Declares the domain questions an environment asks, which is also what asks them.
+
+    There are none at all when every routed service already has a domain, and no email question
+    when the environment already recorded one - the same two conditions the flow has always
+    applied, expressed once so that ``env plan`` and ``env create`` cannot disagree about them.
+
+    :param deployment_config: What the repository deploys.
+    :param environment: The environment being created or updated, when one already exists.
+    :return: The email question and one question per service still needing a domain.
+    """
+    services = services_needing_domains(deployment_config, environment)
+    if not services:
+        return []
+
+    questions: List[Question] = []
+    if not (environment and environment.domain_email):
+        questions.append(
+            Question(
+                key="env.domain_email",
+                message="Enter email for SSL (e.g., for Let's Encrypt)",
+                asked_by="env create",
+                validate=must_be_an_email,
+            )
+        )
+
+    questions.append(
+        Question(
+            key="env.domain.<slug>",
+            message="Enter the domain name of a service",
+            asked_by="env create",
+            validate=must_not_be_blank,
+            for_each=lambda _: [
+                Variant(
+                    token=service.name_slug,
+                    message=f"Enter domain name for service '{service.name_slug}'",
+                )
+                for service in services
+            ],
+        )
+    )
+    return questions
+
+
+def environment_questions(
+    deployment_config: DeploymentConfig,
+    environment: Optional[DeploymentEnvironment] = None,
+) -> List[Question]:
+    """
+    Declares everything making an environment asks, whichever provider and strategy it uses.
+
+    These are asked inline by :func:`create_environment`, which has a validator and a default to
+    apply that a declaration cannot carry. Declaring them as well is what lets ``env plan``
+    report them, and a test checks that each key here is one the flow actually asks.
+
+    :param deployment_config: What the repository deploys.
+    :param environment: The environment being created, when it is already in the configuration.
+    :return: The provider, name, strategy and domain questions, in the order they are asked.
+    """
+    return [
+        Question(
+            key="env.cloud_provider",
+            message="Select the cloud provider for deployment",
+            primitive="select",
+            asked_by="env create",
+            choices=lambda _: CLOUD_PROVIDER_REGISTRY.choices,
+        ),
+        Question(
+            key="env.name",
+            message="Enter the new environment name",
+            asked_by="env create",
+            validate=must_not_be_blank,
+        ),
+        Question(
+            key="env.strategy",
+            message="Select a deployment strategy for the new environment",
+            primitive="select",
+            asked_by="env create",
+            default=environment.strategy if environment else None,
+            choices=lambda _: DEPLOYMENT_STRATEGY_REGISTRY.choices,
+        ),
+    ] + domain_questions(deployment_config, environment)
+
+
 def collect_domain_configuration(
     ctx: OpsmithContext,
     deployment_config: DeploymentConfig,
@@ -424,41 +550,58 @@ def collect_domain_configuration(
     """
     Collects domain information for services that require domains.
 
+    The questions come from :func:`domain_questions` rather than from a loop here, so that what
+    ``env plan`` promises and what this asks are the same list read twice.
+
     :param ctx: The run's context.
     :param deployment_config: The configuration whose services need domains.
     :param environment: The environment being updated, when one already exists.
     :return: The email to issue certificates with, and one domain per service that needed one.
     """
-    domains_map = {d.service_name_slug: d for d in environment.domains} if environment else {}
-    services_needing_domains = [
-        service
-        for service in deployment_config.services
-        if service.service_type in ROUTED_SERVICE_TYPES and service.name_slug not in domains_map
-    ]
-
-    domains: List[DomainInfo] = []
+    questions = domain_questions(deployment_config, environment)
     domain_email = environment.domain_email if environment else None
-    if not services_needing_domains:
-        return domain_email, domains
+    if not questions:
+        return domain_email, []
 
     ctx.events.step(STEP_DNS, "Please provide domain information for your services:")
 
-    if not domain_email:
-        domain_email = ctx.interact.ask(
-            "env.domain_email",
-            "Enter email for SSL (e.g., for Let's Encrypt)",
-            validate=must_be_an_email,
-        )
+    answers = ask_all(
+        ctx.interact,
+        questions,
+        Resolution(events=ctx.events, deployment_config=deployment_config),
+    )
 
-    for service in services_needing_domains:
-        domain_name = ctx.interact.ask(
-            f"env.domain.{service.name_slug}",
-            f"Enter domain name for service '{service.name_slug}'",
-            validate=must_not_be_blank,
-        )
-        domains.append(DomainInfo(service_name_slug=service.name_slug, domain_name=domain_name))
+    domains = [
+        DomainInfo(service_name_slug=key[len("env.domain.") :], domain_name=value)
+        for key, value in answers.items()
+        if key.startswith("env.domain.")
+    ]
+    return answers.get("env.domain_email", domain_email), domains
 
-    return domain_email, domains
+
+def account_detail(
+    ctx: OpsmithContext, provider_class: Type[BaseCloudProvider]
+) -> BaseCloudProviderDetail:
+    """
+    Reaches the cloud account and asks whatever the provider needs choosing about it.
+
+    Three steps, because they are three different things: detecting an account asks nobody
+    anything and is what ``env plan`` can also do, the declared questions are asked through the
+    run's interaction like any other, and building the detail is the provider turning both into
+    the record the environment keeps.
+
+    :param ctx: The run's context.
+    :param provider_class: The provider that was chosen.
+    :return: What the environment records about the provider.
+    :raises CloudCredentialsError: The account could not be reached.
+    """
+    account = provider_class.detect_account(ctx)
+    answers = ask_all(
+        ctx.interact,
+        provider_class.questions(),
+        Resolution(events=ctx.events, account=account),
+    )
+    return provider_class.build_detail(ctx, account, answers)
 
 
 def create_environment(
@@ -492,7 +635,7 @@ def create_environment(
 
     ctx.events.step(STEP_SETUP, f"Initializing {selected_provider} provider...")
     provider_class = CLOUD_PROVIDER_REGISTRY.get_provider_class(selected_provider)
-    cloud_details = provider_class.get_account_details(ctx).model_dump(mode="json")
+    cloud_details = account_detail(ctx, provider_class).model_dump(mode="json")
 
     def is_a_usable_environment_name(value: str) -> Optional[str]:
         """
@@ -568,6 +711,175 @@ def create_environment(
     )
 
     return reported(ctx, result)
+
+
+def declares_questions(implementation: type, base: type) -> bool:
+    """
+    Reports whether a plugin wrote a question tree of its own.
+
+    Declaring is optional, so a class that did not override ``questions`` is not broken - it asks
+    inline and works exactly as before. It does mean a plan of it is partial, and saying so is
+    the difference between a short list and a wrong one.
+
+    :param implementation: The provider or strategy class in use.
+    :param base: The class whose ``questions`` is the do-nothing default.
+    :return: Whether the implementation declares its own questions.
+    """
+    return implementation.questions.__func__ is not base.questions.__func__
+
+
+def plan_environment(
+    ctx: OpsmithContext,
+    deployment_config: DeploymentConfig,
+    *,
+    sources: AnswerSources,
+    write_answers: Optional[Path] = None,
+) -> EnvPlanResult:
+    """
+    Reports every answer creating an environment will need, before anything is created.
+
+    Nothing here writes to a cloud or to the repository. It may *read* from a cloud - listing
+    the regions of an account makes the report far more useful - but every such read is allowed
+    to fail: a plan made on a machine that has no credentials yet is still worth printing, and
+    says which parts of it went unlisted.
+
+    The list forks on two answers. Which questions a provider asks is the provider's business,
+    and the same for a strategy, so until those two are chosen the rest cannot be enumerated.
+    That is the round: answer them, run this again, and the branch they open is reported.
+
+    :param ctx: The run's context.
+    :param deployment_config: What the repository deploys.
+    :param sources: What this run was told up front, consulted alongside the answer store to
+        decide which questions are already answered.
+    :param write_answers: Where to write the skeleton answers file, when one was asked for.
+    :return: What is needed, what is known, and why the list is or is not complete.
+    """
+
+    def known(key: str) -> Tuple[bool, Any]:
+        """
+        :param key: The interaction key.
+        :return: Whether this run already has an answer for it, and what it is.
+        """
+        found, value, _ = sources.supplied(key)
+        if found:
+            return True, value
+        if ctx.answers.has(key):
+            return True, ctx.answers.get(key)
+        return False, None
+
+    environment_name = known("env.name")[1] if known("env.name")[0] else None
+    if environment_name:
+        bind_environment(ctx, str(environment_name))
+
+    existing = next(
+        (env for env in deployment_config.environments if env.name == environment_name), None
+    )
+
+    resolution = Resolution(events=ctx.events, deployment_config=deployment_config, lookup=known)
+
+    questions = environment_questions(deployment_config, existing)
+    reasons: List[str] = []
+
+    provider_name = resolution.get("env.cloud_provider")
+    provider_questions, provider_reasons, account = _provider_plan(ctx, provider_name)
+    reasons.extend(provider_reasons)
+
+    strategy_name = resolution.get("env.strategy")
+    strategy_questions, strategy_reasons = _strategy_plan(strategy_name)
+    reasons.extend(strategy_reasons)
+
+    # The provider's questions come straight after the provider is chosen, and the strategy's
+    # last, which is the order a creation asks them in. A plan a person reads top to bottom is
+    # the plan they are about to live through.
+    ordered = questions[:1] + provider_questions + questions[1:] + strategy_questions
+    evaluation = evaluate(
+        ordered,
+        replace(resolution, account=account),
+        accept_defaults=sources.accept_defaults,
+        tolerant=True,
+    )
+    reasons.extend(evaluation.notes)
+
+    answers_file = None
+    if write_answers is not None:
+        write_answers.parent.mkdir(parents=True, exist_ok=True)
+        write_answers.write_text(skeleton(evaluation.needed), encoding="utf-8")
+        answers_file = str(write_answers)
+        ctx.events.log(STEP_CONFIG, f"Answers skeleton written to: {answers_file}")
+
+    return reported(
+        ctx,
+        EnvPlanResult(
+            environment=str(environment_name) if environment_name else None,
+            provider=str(provider_name) if provider_name else None,
+            strategy=str(strategy_name) if strategy_name else None,
+            complete=evaluation.complete and not reasons,
+            answers_needed=evaluation.needed,
+            answers_known=evaluation.known,
+            blocked_on=evaluation.blocked_on,
+            partial_reasons=reasons,
+            answers_file=answers_file,
+        ),
+    )
+
+
+def _provider_plan(
+    ctx: OpsmithContext, provider_name: Optional[Any]
+) -> Tuple[List[Question], List[str], Optional[Any]]:
+    """
+    Fetches the chosen provider's questions, and its account when it can be reached.
+
+    :param ctx: The run's context.
+    :param provider_name: What ``env.cloud_provider`` is answered with, when it is.
+    :return: The provider's questions, why the plan is partial, and the detected account.
+    :raises InvalidArgument: The name does not belong to a registered provider.
+    """
+    if not provider_name:
+        return (
+            [],
+            ["The cloud provider has not been chosen, so its questions are not listed."],
+            None,
+        )
+
+    provider_class = CLOUD_PROVIDER_REGISTRY.get_provider_class(str(provider_name))
+    reasons: List[str] = []
+    if not declares_questions(provider_class, BaseCloudProvider):
+        reasons.append(
+            f"The {provider_class.name()} provider declares no questions, so anything it asks is"
+            " not listed here."
+        )
+
+    # Detecting the account is what makes a region list real, and it is also the first thing that
+    # fails on a machine with no credentials. A plan is worth having either way, so this is the
+    # one call here that is allowed to come to nothing.
+    account = None
+    try:
+        account = provider_class.detect_account(ctx)
+    except OpsmithError as failure:
+        reasons.append(f"Could not reach the {provider_class.name()} account: {failure.message}")
+
+    return provider_class.questions(), reasons, account
+
+
+def _strategy_plan(strategy_name: Optional[Any]) -> Tuple[List[Question], List[str]]:
+    """
+    Fetches the chosen strategy's questions.
+
+    :param strategy_name: What ``env.strategy`` is answered with, when it is.
+    :return: The strategy's questions, and why the plan is partial.
+    :raises InvalidArgument: The name does not belong to a registered strategy.
+    """
+    if not strategy_name:
+        return [], ["The deployment strategy has not been chosen, so its questions are not listed."]
+
+    strategy_class = DEPLOYMENT_STRATEGY_REGISTRY.get_strategy_class(str(strategy_name))
+    if not declares_questions(strategy_class, BaseDeploymentStrategy):
+        return [], [
+            f"The {strategy_class.name()} strategy declares no questions, so anything it asks is"
+            " not listed here."
+        ]
+
+    return strategy_class.questions(), []
 
 
 def release(
@@ -741,7 +1053,10 @@ __all__ = [
     "bind_environment",
     "collect_domain_configuration",
     "create_environment",
+    "declares_questions",
     "destroy_environment",
+    "domain_questions",
+    "environment_questions",
     "environment_status",
     "init_config",
     "is_deployed",
@@ -749,11 +1064,13 @@ __all__ = [
     "load_config",
     "must_be_an_email",
     "must_not_be_blank",
+    "plan_environment",
     "release",
     "reported",
     "run_command",
     "run_setup",
     "select_environment",
+    "services_needing_domains",
     "state_path",
     "strategy_for",
     "update",

@@ -174,7 +174,7 @@ def test_schema_emits_json_schema(runner, cli):
 
 
 def test_schema_renders_markdown_for_the_skill(runner, cli):
-    """--format markdown renders the same schema as the document phase 6 will ship."""
+    """--format markdown renders the same schema as the document phase 1 will ship."""
     result, envelope = _invoke(runner, cli, "config", "schema", "--format", "markdown")
 
     assert result.exit_code == 0

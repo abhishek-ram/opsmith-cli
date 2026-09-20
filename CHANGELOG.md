@@ -4,12 +4,38 @@ All notable changes to Opsmith are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] - 2026-09-20
 
-The headless core, phase 0 of the [migration to 1.0](docs/notes/2026-09-04-migration-plan.md).
-It ships as 0.5.0 once every part has landed; parts 0a to 0f are in.
+The headless core, phase 0 of the [migration to 1.0](docs/notes/2026-09-04-migration-plan.md),
+complete: parts 0a to 0g.
 
 ### Added
+
+- `opsmith env plan` reports every answer creating an environment will need, before anything is
+  created. For each one it gives the key, the question, the options where it can list them, the
+  default where there is one, and the environment variable a secret should arrive in - and says
+  which of them this run would actually stop for, which depends on whether `--accept-defaults`
+  is in use. It writes nothing, creates nothing, and needs neither docker nor terraform.
+  It does read from your cloud account where it can, to list the regions the account really has,
+  but a machine that has no credentials yet still gets the plan and is told which parts of it
+  went unlisted.
+- Which questions exist depends on the cloud provider and the deployment strategy, so a plan
+  that has not been told those two reports what it can, names them as the answers to give first,
+  and says `complete: false` rather than passing a short list off as the whole one. The same
+  holds for a provider or strategy that declares no questions: `partial_reasons` names it.
+- `opsmith env plan --write-answers FILE` writes that list as a YAML file to fill in and hand
+  back with `--answers`. Anything with a default is written with it; anything still to be
+  answered is written commented out, because a key present with an empty value counts as an
+  answer of the empty string and would quietly satisfy the question it was meant to leave open.
+  A secret is always commented out - those belong in a `--env-file`.
+- Cloud providers declare their questions as data. `AWS` declares the region, `GCP` the project,
+  the region and the zone, each saying which earlier answer its listing depends on. A question
+  declared this way is asked through exactly the same interaction as one asked inline, so a
+  flag, a file or an environment variable answers it identically; what is new is only that it
+  can be reported before it is reached.
+- Naming a cloud provider or a deployment strategy that is not installed is now
+  `INVALID_ARGUMENT` and exit 2, with the names that would have worked in the details. It used
+  to be an unhandled `ValueError` reported as an internal failure.
 
 - Everything the `setup` and `deploy` menus can do is now a subcommand that takes flags and never
   prompts: `opsmith init`, `env list`, `env create`, `env status`, `release`, `update`, `run` and
@@ -79,13 +105,34 @@ It ships as 0.5.0 once every part has landed; parts 0a to 0f are in.
 
 ### Changed
 
+- **Breaking, for third-party cloud providers.** `get_account_details` is replaced by three
+  classmethods on `BaseCloudProvider`, because it was doing three things that happen at three
+  different times: `detect_account` reaches the account and reads the facts that are not a
+  matter of choice, and must not ask anything; `questions` declares what needs choosing, as
+  data; and `build_detail` turns both into the record the environment keeps. Only the first and
+  last are required - a provider that declares no questions and asks inside `build_detail`
+  through `ctx.interact` works exactly as before, and gives up nothing but its coverage in
+  `env plan`. There are no known third-party providers; this is acceptable before 1.0.
+- **Breaking, for GCP environments created headlessly.** The zone used to be taken silently as
+  the first of the region's zones, which is why `--zone` existed and did nothing. It is a real
+  question now: at a terminal the first zone is preselected, so pressing enter gives the old
+  answer, and a headless run supplies `--zone` or takes the same first zone with
+  `--accept-defaults`. A headless GCP run that did neither now stops with `MISSING_ANSWER`
+  naming `env.zone`, which `opsmith env plan` will have told it about beforehand.
+- Splitting the providers up narrows their error handling as a side effect worth having: each
+  call to a cloud SDK is guarded on its own rather than a whole flow at once, so a failure is
+  reported against the thing that actually failed - reaching the account, or listing the regions
+  - instead of everything in the block being reported as broken credentials.
 - **Breaking, for third-party deployment strategies.** The five action methods on
   `BaseDeploymentStrategy` now return a result model from `opsmith.core.results` — `deploy` an
   `EnvCreateResult`, `release` a `ReleaseResult`, `update` an `UpdateResult`, `run` a `RunResult`,
   `destroy` a `DestroyResult` — and a sixth method, `status`, reports what an environment is
-  running by reading its own state file without contacting a cloud. A strategy still declares
-  nothing ahead of time and still asks whatever it needs through `ctx.interact`; what changed is
-  that it now describes what it did, because the CLI reports that. Those descriptions name no
+  running by reading its own state file without contacting a cloud. A strategy still has to
+  declare nothing ahead of time and still asks whatever it needs through `ctx.interact`; what
+  changed is that it now describes what it did, because the CLI reports that. It may now also
+  implement `questions`, listing what it is going to ask so that `opsmith env plan` can report
+  it - which is optional, is never asked on the strategy's behalf, and costs a strategy that
+  skips it nothing but a line in the plan saying the list is partial. Those descriptions name no
   topology — infrastructure is a list of `Resource`, not a public IP and an instance type — so a
   strategy that is not one machine can still answer honestly. There are no known third-party
   strategies; this is acceptable before 1.0.

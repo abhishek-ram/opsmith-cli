@@ -16,6 +16,7 @@ from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from opsmith.core.interaction import Notice
+from opsmith.core.questions import ChoiceOption, PlannedQuestion
 from opsmith.types import InfrastructureDependency, ServiceInfo
 
 
@@ -192,6 +193,52 @@ class EnvCreateResult(OperationResult):
     )
 
 
+class EnvPlanResult(OperationResult):
+    """What ``opsmith env plan`` worked out that a run is going to ask for.
+
+    It is the exit-3 stop, reported all at once and before anything is created. Which questions
+    exist depends on the cloud provider and the strategy, so a plan that does not know those two
+    reports what it can and says the list is partial rather than claiming to be complete.
+    """
+
+    environment: Optional[str] = Field(
+        None, description="The environment being planned, when one was named."
+    )
+    provider: Optional[str] = Field(
+        None, description="The cloud provider the plan was made for, when one was chosen."
+    )
+    strategy: Optional[str] = Field(
+        None, description="The deployment strategy the plan was made for, when one was chosen."
+    )
+    complete: bool = Field(
+        ...,
+        description=(
+            "Whether this is the whole list. False when something still had to be chosen before"
+            " the rest could be worked out, or when a provider or strategy declares no questions."
+        ),
+    )
+    answers_needed: List[PlannedQuestion] = Field(
+        default_factory=list, description="Every answer the run will stop for, in the order asked."
+    )
+    answers_known: List[str] = Field(
+        default_factory=list,
+        description=(
+            "The keys that are already answered, by name. Values are not reported: some of them"
+            " are secrets and this is printed."
+        ),
+    )
+    blocked_on: List[str] = Field(
+        default_factory=list,
+        description="The keys to answer first, before the rest of the list can be worked out.",
+    )
+    partial_reasons: List[str] = Field(
+        default_factory=list, description="Why the list is not complete, in plain text."
+    )
+    answers_file: Optional[str] = Field(
+        None, description="Where the answers skeleton was written, when one was asked for."
+    )
+
+
 class EnvStatusResult(OperationResult):
     """What ``opsmith env status`` reads out of the environment's state file."""
 
@@ -307,20 +354,24 @@ class DestroyResult(OperationResult):
     )
 
 
-#: Re-exported because a notice is part of every result, even though it is declared beside the
-#: ``notify`` that produces it.
+#: Two re-exports. A notice is part of every result even though it is declared beside the
+#: ``notify`` that produces it, and a planned question is part of a result even though it is
+#: declared beside the tree it is worked out from.
 __all__ = [
+    "ChoiceOption",
     "ConfigIssue",
     "DeployedService",
     "DestroyResult",
     "DnsRecord",
     "EnvCreateResult",
     "EnvListResult",
+    "EnvPlanResult",
     "EnvStatusResult",
     "EnvironmentSummary",
     "InitResult",
     "Notice",
     "OperationResult",
+    "PlannedQuestion",
     "ReleaseResult",
     "Resource",
     "ResourceKind",

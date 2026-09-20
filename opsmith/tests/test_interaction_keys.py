@@ -3,6 +3,11 @@
 Keys are the whole point of the interaction API: a flag, an answers file or a driving agent can
 only supply an answer for a question it can name. So the names cannot be invented at the call
 site - they come from one table, and this walks the package to prove it.
+
+There are two ways a module names a key: by calling one of the primitives on an interaction, and
+by declaring a :class:`~opsmith.core.questions.Question`. Both are walked, because a declared
+question is answered by exactly the same flag as an asked one - a provider that stopped calling
+``interact`` directly has not stopped asking.
 """
 
 import ast
@@ -16,6 +21,10 @@ KEY_TABLE = PACKAGE_ROOT.parent / "docs" / "notes" / "2026-09-04-migration-plan.
 #: The primitives that take a key. `notify` does not, because it asks nothing.
 KEYED_PRIMITIVES: Set[str] = {"ask", "select", "confirm", "edit", "wait_for"}
 
+#: The constructor that declares a question rather than asking it. Its key is the first thing it
+#: is given, by keyword, because a declaration is read by people more often than it is written.
+QUESTION_CONSTRUCTOR = "Question"
+
 #: What both a table placeholder and an f-string interpolation are reduced to before comparing,
 #: because `service.<slug>.confirm` and `f"service.{service.name_slug}.confirm"` are one key.
 PLACEHOLDER = "<*>"
@@ -23,12 +32,31 @@ PLACEHOLDER = "<*>"
 #: Directories inside the package that ask nothing.
 EXEMPT_DIRECTORIES: Set[str] = {"tests"}
 
+#: The keys that are both declared as data and asked by hand in the same module, and which
+#: module does both. Everywhere else a declaration is handed to ``ask_all``, so the declaration
+#: *is* the call site and there is nothing for it to drift from; these are the only places the
+#: two can disagree, which is what the test below exists to stop.
+DECLARED_AND_ASKED_BY_HAND: Dict[str, Set[str]] = {
+    "core/operations.py": {"env.cloud_provider", "env.name", "env.strategy"},
+    "deployment_strategies/monolithic.py": {
+        "env.instance_type",
+        "envvar.<*>",
+        "build_env.<*>.<*>",
+    },
+}
+
+#: The one module that asks a question it does not name. ``core/questions.py`` walks a list of
+#: declarations and asks each one, so the key it passes is whatever it was handed - and every key
+#: it can ever pass is a ``Question`` this walk has already read from wherever it was declared.
+GENERIC_ASKERS: Set[str] = {"core/questions.py"}
+
 #: Keys that must be found, one per module that asks something. Without them the walker could
 #: match nothing at all and the test would still pass.
 EXPECTED_KEYS: Set[str] = {
     "app.name",  # cli/commands/setup.py
     "env.name",  # cli/commands/deploy.py
-    "env.region",  # cloud_providers/
+    "env.region",  # cloud_providers/, declared rather than asked
+    "env.domain.<*>",  # core/operations.py, declared rather than asked
     "envvar.<*>",  # deployment_strategies/monolithic.py
     "dockerfile.edit",  # service_detector.py
 }
@@ -74,6 +102,38 @@ def _key_of(argument: ast.expr) -> Optional[str]:
     return "".join(parts)
 
 
+def _is_a_question(node: ast.Call) -> bool:
+    """
+    Reports whether a call declares a question.
+
+    :param node: The call to inspect.
+    :return: Whether it is a ``Question(...)`` constructor.
+    """
+    if isinstance(node.func, ast.Name):
+        return node.func.id == QUESTION_CONSTRUCTOR
+    return isinstance(node.func, ast.Attribute) and node.func.attr == QUESTION_CONSTRUCTOR
+
+
+def _declared_key(node: ast.Call) -> Optional[str]:
+    """
+    Reads the key out of a question declaration.
+
+    A declaration writes its placeholder out in full - ``env.domain.<slug>`` - where an asked key
+    interpolates one, so it is normalised here rather than by :func:`_key_of`.
+
+    :param node: The ``Question(...)`` call.
+    :return: The key with its placeholders normalised, or None when it is not named statically.
+    """
+    named = None
+    for keyword in node.keywords:
+        if keyword.arg == "key":
+            named = _key_of(keyword.value)
+    if named is None and node.args:
+        named = _key_of(node.args[0])
+
+    return None if named is None else re.sub(r"<[^>]+>", PLACEHOLDER, named)
+
+
 def _is_an_interaction_call(node: ast.Call) -> bool:
     """
     Reports whether a call is one of the keyed primitives on an interaction.
@@ -90,6 +150,34 @@ def _is_an_interaction_call(node: ast.Call) -> bool:
     if isinstance(receiver, ast.Attribute):
         return receiver.attr == "interact"
     return isinstance(receiver, ast.Name) and receiver.id == "interact"
+
+
+def _assigned_keys(tree: ast.AST) -> Dict[str, str]:
+    """
+    Finds the local variables a module builds a key into before asking with it.
+
+    ``_prompt_for_build_env_vars`` does this: it needs the key three times - to migrate an older
+    value, to read the remembered one and to ask - so it names it once. Without this the walker
+    would see a bare ``key`` and skip it, and a question would go unchecked.
+
+    A name assigned more than once is left out rather than guessed at.
+
+    :param tree: The module to inspect.
+    :return: The key each such variable holds, with its interpolations normalised.
+    """
+    found: Dict[str, List[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name):
+            continue
+
+        key = _key_of(node.value)
+        if key is not None:
+            found.setdefault(target.id, []).append(key)
+
+    return {name: keys[0] for name, keys in found.items() if len(set(keys)) == 1}
 
 
 def _forwarders(tree: ast.AST) -> Tuple[Dict[str, int], Set[str]]:
@@ -124,11 +212,14 @@ def _forwarders(tree: ast.AST) -> Tuple[Dict[str, int], Set[str]]:
     return positions, parameter_names
 
 
-def _keys_used() -> Dict[str, List[str]]:
+def _keys_used(*, declarations: bool = True, asks: bool = True) -> Dict[str, List[str]]:
     """
-    Walks the package for interaction calls, and for calls to the helpers that forward a key.
+    Walks the package for interaction calls, declared questions, and the helpers that forward a
+    key.
 
-    :return: The keys each module asks, by module path.
+    :param declarations: Whether to collect the key of each ``Question(...)`` declaration.
+    :param asks: Whether to collect the key of each call to an interaction primitive.
+    :return: The keys each module names, by module path.
     :raises AssertionError: A key is built in a way nothing can read statically, which would
         leave a question no flag, file or agent can answer.
     """
@@ -148,9 +239,20 @@ def _keys_used() -> Dict[str, List[str]]:
 
     used: Dict[str, List[str]] = {}
     for module, tree in trees.items():
+        if module.replace("\\", "/") in GENERIC_ASKERS:
+            continue
+
+        assigned = _assigned_keys(tree)
         keys = []
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
+                continue
+
+            if _is_a_question(node):
+                declared = _declared_key(node)
+                assert declared is not None, f"{module}: a declared question must name its key"
+                if declarations:
+                    keys.append(declared)
                 continue
 
             if _is_an_interaction_call(node):
@@ -165,8 +267,11 @@ def _keys_used() -> Dict[str, List[str]]:
 
             argument = node.args[position]
             key = _key_of(argument)
+            if key is None and isinstance(argument, ast.Name):
+                key = assigned.get(argument.id)
             if key is not None:
-                keys.append(key)
+                if asks:
+                    keys.append(key)
                 continue
 
             forwarding = isinstance(argument, ast.Name) and argument.id in forwarded_parameters
@@ -179,8 +284,9 @@ def _keys_used() -> Dict[str, List[str]]:
 
 def test_every_key_asked_for_is_declared():
     """
-    Collects the key from every interaction call in the package and fails on one the migration
-    plan's table does not declare, so a new question cannot ship without a name a flag can use.
+    Collects the key from every interaction call and every declared question in the package and
+    fails on one the migration plan's table does not declare, so a new question cannot ship
+    without a name a flag can use.
     """
     declared = _declared_keys()
     undeclared = {
@@ -203,3 +309,19 @@ def test_the_walk_finds_the_questions_the_flows_ask():
     found = {key for keys in _keys_used().values() for key in keys}
 
     assert EXPECTED_KEYS <= found, f"missing: {sorted(EXPECTED_KEYS - found)}"
+
+
+def test_a_declaration_that_is_also_asked_by_hand_agrees_with_its_call_site():
+    """
+    Guards the one duplication declaring questions introduces.
+
+    A key that is declared for ``env plan`` and asked separately by hand has two spellings of the
+    same name, and renaming one of them would leave the plan quietly promising a question the run
+    never asks. Every such pair is named above, and both halves have to be there.
+    """
+    declared = _keys_used(asks=False)
+    asked = _keys_used(declarations=False)
+
+    for module, keys in DECLARED_AND_ASKED_BY_HAND.items():
+        assert keys <= set(declared.get(module, [])), f"{module} no longer declares all of {keys}"
+        assert keys <= set(asked.get(module, [])), f"{module} no longer asks all of {keys}"

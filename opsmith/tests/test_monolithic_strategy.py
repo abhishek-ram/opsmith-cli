@@ -18,6 +18,7 @@ from pydantic import Field
 
 from opsmith.cloud_providers import CLOUD_PROVIDER_REGISTRY
 from opsmith.cloud_providers.base import (
+    AccountInfo,
     BaseCloudProvider,
     BaseCloudProviderDetail,
     CpuArchitectureEnum,
@@ -90,8 +91,13 @@ class FakeCloudProvider(BaseCloudProvider):
         return FakeCloudDetail
 
     @classmethod
-    def get_account_details(cls, ctx: OpsmithContext) -> FakeCloudDetail:
-        """Returns fixed account details without asking anything."""
+    def detect_account(cls, ctx: OpsmithContext) -> AccountInfo:
+        """Reaches no cloud: there is nothing to detect about a provider that does not exist."""
+        return AccountInfo()
+
+    @classmethod
+    def build_detail(cls, ctx, account, answers) -> FakeCloudDetail:
+        """Returns the fixed detail; this provider declares no questions and asks none."""
         return FakeCloudDetail(region="us-test-1")
 
     def get_instance_types(self) -> MachineTypeList:

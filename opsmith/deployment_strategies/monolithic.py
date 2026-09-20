@@ -26,6 +26,7 @@ from opsmith.core.events import (
     STEP_SETUP,
     STEP_VM,
 )
+from opsmith.core.questions import Question, Resolution, Variant
 from opsmith.core.results import (
     DeployedService,
     DestroyResult,
@@ -224,6 +225,101 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             "Deploys the entire application as a single unit. Best used for experiments and hobby"
             " applications."
         )
+
+    @classmethod
+    def questions(cls) -> List[Question]:
+        """
+        Declares what this strategy asks on top of what making an environment asks anyway.
+
+        The three are the machine to run on, the runtime value of every environment variable the
+        services declare, and the build-time value of every one a frontend declares. None of them
+        is asked from here - each is asked inline at the point in the deploy that needs it - so
+        these declarations exist to be reported by ``opsmith env plan`` and are checked against
+        the call sites by the test suite.
+
+        :return: The instance type, the runtime variables and the frontend build variables.
+        """
+        return [
+            Question(
+                key="env.instance_type",
+                message="Select an instance type for the new environment",
+                primitive="select",
+                asked_by=cls.name(),
+            ),
+            Question(
+                key="envvar.<KEY>",
+                message="Enter value for a runtime environment variable",
+                asked_by=cls.name(),
+                for_each=cls.runtime_variables,
+            ),
+            Question(
+                key="build_env.<slug>.<KEY>",
+                message="Enter a frontend's build-time environment variable",
+                asked_by=cls.name(),
+                for_each=cls.build_variables,
+            ),
+        ]
+
+    @staticmethod
+    def runtime_variables(resolution: Resolution) -> List[Variant]:
+        """
+        Expands the runtime environment variables the services between them declare.
+
+        What a deploy actually asks for is the intersection of these and the compose file the
+        model writes, which cannot be known before the run. These are the ones the configuration
+        declares, which is the honest answer to "what will it want", and is a superset.
+
+        :param resolution: What is known, for the configuration to read the variables from.
+        :return: One variant per configured variable, cheapest first to read: by name.
+        """
+        if resolution.deployment_config is None:
+            return []
+
+        configured = resolution.deployment_config.get_env_var_configs()
+        return [
+            Variant(
+                token=key,
+                message=f"Enter value for {key}",
+                default=config.default_value,
+                secret=config.is_secret,
+            )
+            for key, config in sorted(configured.items())
+        ]
+
+    @staticmethod
+    def build_variables(resolution: Resolution) -> List[Variant]:
+        """
+        Expands the build-time environment variables each frontend declares.
+
+        :param resolution: What is known, for the configuration to read the services from.
+        :return: One variant per variable per frontend service.
+        """
+        if resolution.deployment_config is None:
+            return []
+
+        variants = []
+        for service in resolution.deployment_config.services:
+            if service.service_type != ServiceTypeEnum.FRONTEND:
+                continue
+            for env_var in service.env_vars:
+                # Worded without the indentation the deploy prompts with: that indent belongs to
+                # a terminal running down a list of one service's variables, and a plan is a
+                # different list entirely.
+                if env_var.is_secret:
+                    subject = f"secret '{env_var.key}'"
+                else:
+                    subject = f"'{env_var.key}'"
+                variants.append(
+                    Variant(
+                        token=f"{service.name_slug}.{env_var.key}",
+                        message=(
+                            f"Enter the build-time value for {subject} of '{service.name_slug}'"
+                        ),
+                        default=env_var.default_value,
+                        secret=env_var.is_secret,
+                    )
+                )
+        return variants
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

@@ -48,14 +48,14 @@ GENERIC_FLAGS = {"--answer", "--accept-defaults", "--accept-detected", "--wait-t
 #: must not be in the code; asserting both is what stops this test passing because a 0f flag
 #: quietly disappeared alongside them.
 LATER_PHASES = {
-    "--workload-tier",  # phase 1
-    "--workload",  # phase 1
-    "--state",  # phase 3
-    "--input",  # phase 4
+    "--workload-tier",  # phase 2
+    "--workload",  # phase 2
+    "--state",  # phase 4
+    "--input",  # phase 5
 }
 
 #: The one row whose keys and flags cannot be paired off, because it declares three keys and two
-#: flags plus a note that the third is answered generically. It is a phase 1 row, so nothing here
+#: flags plus a note that the third is answered generically. It is a phase 2 row, so nothing here
 #: depends on reading it.
 UNPAIRABLE_ROW_KEYS = {
     "env.workload.tier",

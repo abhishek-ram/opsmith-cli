@@ -20,6 +20,7 @@ from opsmith.core.events import (
     BufferingSink,
 )
 from opsmith.core.interaction import Choice
+from opsmith.core.questions import Question
 from opsmith.core.results import (
     DestroyResult,
     EnvCreateResult,
@@ -91,9 +92,21 @@ class DeploymentStrategyRegistry:
         self._strategies[strategy_class.name()] = strategy_class
 
     def get_strategy_class(self, strategy_name: str) -> Type["BaseDeploymentStrategy"]:
-        """Retrieves a strategy class from the registry."""
+        """
+        Retrieves a strategy class from the registry.
+
+        :param strategy_name: The name the configuration or ``--strategy`` gave.
+        :return: The strategy class.
+        :raises InvalidArgument: No strategy is registered under that name. A usage error rather
+            than a ValueError, because the name usually came off a flag and a driver reading the
+            envelope needs the names that would have worked.
+        """
         if strategy_name not in self._strategies:
-            raise ValueError(f"Strategy '{strategy_name}' not found.")
+            raise InvalidArgument(
+                f"There is no deployment strategy named '{strategy_name}'.",
+                hint="Install its plugin, or use one of the strategies listed in the details.",
+                details={"strategy": strategy_name, "known": sorted(self._strategies)},
+            )
         return self._strategies[strategy_name]
 
     @property
@@ -123,6 +136,21 @@ class BaseDeploymentStrategy(abc.ABC):
     def description(cls) -> str:
         """A brief description of the deployment strategy."""
         raise NotImplementedError
+
+    @classmethod
+    def questions(cls) -> List[Question]:
+        """
+        Declares what this strategy will need a person to answer, without asking any of it.
+
+        This is not part of the contract a strategy has to meet, and nothing here is ever asked
+        on a strategy's behalf: a strategy still asks whatever it needs, wherever it needs it,
+        through ``ctx.interact``. Declaring is what puts those questions in ``opsmith env plan``
+        before a run starts, and a strategy that declares nothing is reported as a partial plan
+        and behaves exactly as it did before.
+
+        :return: The questions, in the order they will be asked.
+        """
+        return []
 
     def __init__(self, ctx: OpsmithContext):
         """

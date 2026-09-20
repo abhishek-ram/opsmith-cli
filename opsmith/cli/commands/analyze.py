@@ -1,4 +1,4 @@
-"""The `repomap` command: print a map of the repository. Phase 5 replaces it."""
+"""The `repomap` command: print a map of the repository. Phase 6 replaces it."""
 
 from typing import Dict, Optional
 

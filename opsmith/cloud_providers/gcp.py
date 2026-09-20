@@ -1,4 +1,5 @@
-from typing import TYPE_CHECKING, List, Literal, Type
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any, Iterator, List, Literal, Mapping, Optional, Type
 
 import google.auth
 from google.auth.credentials import Credentials
@@ -7,6 +8,7 @@ from google.cloud import compute_v1
 from pydantic import Field
 
 from opsmith.cloud_providers.base import (
+    AccountInfo,
     BaseCloudProvider,
     BaseCloudProviderDetail,
     CpuArchitectureEnum,
@@ -16,9 +18,43 @@ from opsmith.cloud_providers.base import (
 from opsmith.core.errors import CloudCredentialsError, OpsmithError
 from opsmith.core.events import STEP_VM, EventSink
 from opsmith.core.interaction import Choice
+from opsmith.core.questions import Question, Resolution
 
 if TYPE_CHECKING:
     from opsmith.core.context import OpsmithContext
+
+#: Where a reader is sent when GCP will not answer.
+GCP_CREDENTIALS_HELP = "https://cloud.google.com/docs/authentication/provide-credentials-adc"
+
+
+@contextmanager
+def gcp_errors(doing: str) -> Iterator[None]:
+    """
+    Reports a GCP SDK failure as a credentials error, and lets Opsmith's own errors through.
+
+    It wraps each call to GCP separately rather than a whole flow, so that a cancelled prompt in
+    between two of them is still reported as a cancellation - which is what it used to not be.
+
+    :param doing: What was being attempted, for the message.
+    :raises CloudCredentialsError: The SDK call failed.
+    """
+    try:
+        yield
+    except OpsmithError:
+        # A cancelled prompt, or anything else Opsmith describes for itself, is reported as what
+        # it is. Only the SDK failures below become a credentials error.
+        raise
+    except DefaultCredentialsError as e:
+        raise CloudCredentialsError(
+            message=f"GCP Application Default Credentials error: {e}",
+            help_url=GCP_CREDENTIALS_HELP,
+        )
+    except Exception as e:
+        raise CloudCredentialsError(
+            message=f"An unexpected error occurred while {doing}: {e}",
+            help_url=GCP_CREDENTIALS_HELP,
+        )
+
 
 GCP_REGION_DESCRIPTIONS = {
     "africa-south1": "Johannesburg, South Africa",
@@ -61,6 +97,16 @@ GCP_REGION_DESCRIPTIONS = {
     "us-west3": "Salt Lake City, Utah, USA",
     "us-west4": "Las Vegas, Nevada, USA",
 }
+
+
+class GCPAccountInfo(AccountInfo):
+    """The credentials a GCP run was authenticated with.
+
+    They are a live SDK object, which is exactly why an account is not written down: the region
+    and zone listings need them, and the next run authenticates again.
+    """
+
+    credentials: Credentials = Field(..., description="The application default credentials.")
 
 
 class GCPCloudDetail(BaseCloudProviderDetail):
@@ -183,46 +229,120 @@ class GCPProvider(BaseCloudProvider):
         return MachineTypeList(machines=sorted_machines)
 
     @classmethod
-    def get_account_details(cls, ctx: "OpsmithContext") -> GCPCloudDetail:
+    def detect_account(cls, ctx: "OpsmithContext") -> GCPAccountInfo:
         """
-        Retrieves structured GCP account details by listing available projects
-        and prompting the user for selection.
+        Authenticates against GCP, without asking anybody anything.
 
         :param ctx: The run's context, for reporting the wait on the GCP API.
-        :return: The project, region and zone to deploy into.
+        :return: The credentials the region and zone listings are made with.
+        :raises CloudCredentialsError: There are no application default credentials.
         """
-        try:
+        with gcp_errors("reading the GCP application default credentials"):
             credentials, _ = google.auth.default()
 
-            selected_project_id = ctx.interact.ask(
-                "env.project_id", "Enter the GCP project you want to use"
+        return GCPAccountInfo(credentials=credentials)
+
+    @classmethod
+    def questions(cls) -> List[Question]:
+        """
+        Declares the three things GCP needs choosing, in the order each depends on the last.
+
+        The zone used to be taken silently as the first of the region's zones, which is why
+        ``--zone`` existed and did nothing. It is a question now, with the first zone offered as
+        the recommendation, so a person keeps the old answer by pressing enter and a driver is
+        told the choice exists.
+
+        :return: The project, region and zone questions.
+        """
+        return [
+            Question(
+                key="env.project_id",
+                message="Enter the GCP project you want to use",
+                asked_by=cls.name(),
+            ),
+            Question(
+                key="env.region",
+                message="Select a GCP region",
+                primitive="select",
+                asked_by=cls.name(),
+                depends_on=("env.project_id",),
+                choices=cls.region_choices,
+            ),
+            Question(
+                key="env.zone",
+                message="Select a GCP zone",
+                primitive="select",
+                asked_by=cls.name(),
+                depends_on=("env.project_id", "env.region"),
+                choices=cls.zone_choices,
+            ),
+        ]
+
+    @staticmethod
+    def region_choices(resolution: Resolution) -> Optional[List[Choice]]:
+        """
+        Lists the regions of the project that was just named.
+
+        :param resolution: What is known so far: the project, and the credentials to ask with.
+        :return: One choice per region, or None when there is no account to ask with, which is
+            what a plan on a machine with no credentials gets.
+        :raises CloudCredentialsError: GCP would not answer.
+        """
+        if resolution.account is None:
+            return None
+
+        with gcp_errors("listing GCP regions"):
+            return GCPProvider.get_regions(
+                resolution.get("env.project_id"),
+                resolution.account.credentials,
+                resolution.events,
             )
 
-            regions = cls.get_regions(selected_project_id, credentials, ctx.events)
-            selected_region = ctx.interact.select("env.region", "Select a GCP region", regions)
+    @staticmethod
+    def zone_choices(resolution: Resolution) -> Optional[List[Choice]]:
+        """
+        Lists the zones of the region that was just chosen, recommending the first.
 
-            zones = cls.get_zones(selected_project_id, selected_region, credentials)
-            if not zones:
-                raise ValueError(f"No zones found for region '{selected_region}'.")
+        :param resolution: What is known so far: the project, the region, and the credentials.
+        :return: One choice per zone, or None when there is no account to ask with.
+        :raises CloudCredentialsError: GCP would not answer, or the region has no zones.
+        """
+        if resolution.account is None:
+            return None
 
-            # For now, just use the first zone.
-            selected_zone = zones[0]
-
-            return GCPCloudDetail(
-                project_id=selected_project_id, region=selected_region, zone=selected_zone
+        region = resolution.get("env.region")
+        with gcp_errors("listing GCP zones"):
+            zones = GCPProvider.get_zones(
+                resolution.get("env.project_id"), region, resolution.account.credentials
             )
 
-        except OpsmithError:
-            # A cancelled prompt, or anything else Opsmith describes for itself, is reported as
-            # what it is. Only the SDK failures below become a credentials error.
-            raise
-        except DefaultCredentialsError as e:
+        if not zones:
             raise CloudCredentialsError(
-                message=f"GCP Application Default Credentials error: {e}",
-                help_url="https://cloud.google.com/docs/authentication/provide-credentials-adc",
+                message=f"No zones found for region '{region}'.",
+                help_url=GCP_CREDENTIALS_HELP,
             )
-        except Exception as e:
-            raise CloudCredentialsError(
-                message=f"An unexpected error occurred while fetching GCP project list: {e}",
-                help_url="https://cloud.google.com/docs/authentication/provide-credentials-adc",
-            )
+
+        # The first zone was what an older Opsmith took without asking, so it stays the answer a
+        # person gets for pressing enter and a driver gets from --accept-defaults.
+        return [
+            Choice(label=zone, value=zone, recommended=index == 0)
+            for index, zone in enumerate(zones)
+        ]
+
+    @classmethod
+    def build_detail(
+        cls, ctx: "OpsmithContext", account: GCPAccountInfo, answers: Mapping[str, Any]
+    ) -> GCPCloudDetail:
+        """
+        Assembles what the environment records about GCP.
+
+        :param ctx: The run's context. Unused: every question GCP asks is declared.
+        :param account: What :meth:`detect_account` found.
+        :param answers: The answers to :meth:`questions`.
+        :return: The project, region and zone to deploy into.
+        """
+        return GCPCloudDetail(
+            project_id=answers["env.project_id"],
+            region=answers["env.region"],
+            zone=answers["env.zone"],
+        )

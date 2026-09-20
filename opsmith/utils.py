@@ -43,7 +43,7 @@ def _probe_terraform() -> Optional[str]:
         return json.loads(completed.stdout)["terraform_version"]
     except (ValueError, KeyError, TypeError):
         # A terraform too old for -json still counts as installed; the version is what is
-        # unknown, and phase 3 is what will care about the difference.
+        # unknown, and phase 4 is what will care about the difference.
         return ""
 
 

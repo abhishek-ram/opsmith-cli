@@ -531,6 +531,7 @@ config_app.command("show")(handle_errors(config_commands.show))
 app.add_typer(config_app, name="config")
 
 env_app.command("list")(handle_errors(env_commands.list_environments))
+env_app.command("plan")(handle_errors(env_commands.plan))
 env_app.command("create")(handle_errors(env_commands.create))
 env_app.command("status")(handle_errors(env_commands.status))
 app.add_typer(env_app, name="env")

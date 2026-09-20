@@ -38,7 +38,7 @@ before the body, rather than in the callback — click runs the group callback b
 subcommand's `--help`, so resolving there would make `opsmith setup --help` demand the very
 configuration it is explaining. A command that declares no tools is never probed for any, which is
 what lets `opsmith config validate` run on a machine with neither docker nor terraform; the
-terraform version the check parses is recorded on the context for phase 3.
+terraform version the check parses is recorded on the context for phase 4.
 
 ## Architecture
 
@@ -47,7 +47,7 @@ terraform version the check parses is recorded on the context for phase 3.
 | Module | Holds |
 |--------|-------|
 | `cli/` | Everything that knows about a terminal: `app.py` (Typer assembly, global options, the error handler), `output.py` (renderers), `interaction.py` (`TerminalInteraction`), `state.py` (`CliState`), `flags.py` (the flag-to-answer table), `commands/` (one per command, plus the `@requires` declaration in its `__init__.py`) |
-| `core/` | Orchestration that never touches a terminal: `errors.py`, `events.py`, `interaction.py`, `context.py`, `provisioners.py`, `llm.py`, `config.py`, `answers.py`, `steps.py`, `results.py`, `operations.py` |
+| `core/` | Orchestration that never touches a terminal: `errors.py`, `events.py`, `interaction.py`, `context.py`, `provisioners.py`, `llm.py`, `config.py`, `answers.py`, `steps.py`, `questions.py`, `results.py`, `operations.py` |
 | `cloud_providers/` | AWS and GCP, plus the registry third parties plug into |
 | `deployment_strategies/` | `base.py` holds the shared steps, `monolithic.py` composes them |
 | `infra_provisioners/` | Terraform and Ansible wrappers; the only code that shells out |
@@ -84,6 +84,21 @@ Everything else follows from that rule:
   nothing answers is `MissingAnswerError` (also 3), and an answer that was supplied and refused is
   `InvalidArgument` (exit 2), because telling a driver to supply what it just supplied would loop
   forever.
+- **A question may also be declared, and `env plan` is why.** `opsmith/core/questions.py` holds
+  `Question` - a key, how it is asked, where its options come from, and what has to be answered
+  before it can be enumerated at all - plus the two things done with a list of them: `ask_all`
+  walks it through `ctx.interact` and is what a real run uses, and `evaluate` walks the same
+  list asking nothing, which is what `opsmith env plan` reports. **Declaring is optional and is
+  never a second way to ask**: nothing is asked on a plugin's behalf, and a provider or strategy
+  that declares nothing works exactly as before and is reported as a partial plan. A cloud
+  provider is the one place the split is mandatory, because `get_account_details` was doing
+  three things at three different times: `detect_account` (no interaction, so `plan` may call
+  it), `questions`, and `build_detail`. A choice loader is a side-effect-free read that returns
+  `None` when it cannot enumerate from here; `evaluate(tolerant=True)` turns a loader that
+  fails outright into a note, which is the one place that is allowed and the reason `env plan`
+  answers on a machine with no credentials. Whether a question is `required` is never declared -
+  it is derived from the same rule `HeadlessInteraction._resolve` applies, so the plan and the
+  run cannot disagree about what will stop.
 - **Every answer is remembered, outside the repository.** `ctx.answers`
   (`opsmith/core/answers.py`) writes each answer through to `answers.yml` — a flat mapping
   `--answers` can read back — the moment it is given, in both modes. A secret goes to
@@ -178,13 +193,22 @@ Terraform state in users' existing projects.
 Cloud providers, deployment strategies and LLM models are singleton registries loaded from entry
 points (`opsmith.cloud_providers`, `opsmith.deployment_strategies`, `opsmith.models`). They load at
 import time, before there is a renderer, so they report into a `BufferingSink` that
-`_drain_registry_events` in `opsmith/cli/app.py` replays once the CLI can render.
+`_drain_registry_events` in `opsmith/cli/app.py` replays once the CLI can render. Asking either
+registry for a name it does not hold is `InvalidArgument` and exit 2, with the known names in the
+details, because the name usually came off a flag.
+
+A cloud provider implements `detect_account`, `build_detail` and `get_instance_types`; a strategy
+implements the six action methods. `questions()` is concrete on both bases and returns `[]`, so
+declaring is opt-in. Two keys are declared in one place and asked in another - the environment
+shell in `core/operations.py` and the three in `monolithic.py` - and
+`DECLARED_AND_ASKED_BY_HAND` in `opsmith/tests/test_interaction_keys.py` is what stops the two
+spellings drifting. Everywhere else the declaration is handed to `ask_all` and *is* the call site.
 
 ### Where the LLM is used
 
 `opsmith/agent.py` builds a `pydantic-ai` agent with two tools (read a repo-mapped file, generate a
 secret). It is called for service detection, Dockerfile generation and repair, VM sizing, compose
-generation, and judging container logs after a deploy. Prompts live in `opsmith/prompts.py`. Phase 1
+generation, and judging container logs after a deploy. Prompts live in `opsmith/prompts.py`. Phase 2
 of the migration below moves the rendering and arithmetic out of the model; judgment stays.
 
 ### `.opsmith/` is the user's, and is committed
@@ -217,15 +241,55 @@ anything structural.
 A spec is written before the work and stops changing once it ships; do not amend one to match what
 was built. Parts `0a` (CLI split and errors), `0b` (context, events, provisioner injection),
 `0c` (model configuration, tool checks, the `config` commands), `0d` (the interaction API and its
-terminal implementation), `0e` (headless mode, the answer store, resume) and `0f` (the headless
-subcommands and typed results) have landed. `0g` is next: cloud providers declare their questions
-as data instead of prompting inside themselves, and `env plan` reports what a run will need before
-it starts.
+terminal implementation), `0e` (headless mode, the answer store, resume), `0f` (the headless
+subcommands and typed results) and `0g` (provider questions and `env plan`) have all landed.
+**Phase 0 is complete and shipped as 0.5.0.** Phase 1 (coding-harness integration) is next.
+
+**The phases were renumbered on 2026-09-20**, when harness integration moved from last to first:
+old 6 became 1, and old 1 to 5 each moved up one. Phase 0, 7 and 8 kept their numbers. Everything
+in `docs/` uses the new numbers except the seven shipped phase 0 specs, which still use the old
+ones; the map is at the end of the migration plan. The numbers in the paragraphs below are the new
+ones.
+
+Five deviations from the `0g` spec.
+
+`detect_account(ctx)` and `build_detail(ctx, account, answers)` take the context, where the spec's
+sketch took neither: detection reports its wait through `ctx.events`, and `build_detail` needs
+`ctx.interact` for a provider that declares nothing and prefers to ask inline — which the spec's
+own non-goal requires to keep working.
+
+The environment-shell questions (`env.name`, `env.strategy`, `env.domain_email`,
+`env.domain.<slug>`) are declared in `core/operations.py`, not by the monolithic strategy as the
+spec's file table has it, because operations is what asks them and a declaration has to name who
+actually asks. Monolithic declares only what is its own. `collect_domain_configuration` walks its
+own declaration through `ask_all`, so the domain questions have exactly one source rather than
+two that can drift.
+
+`required` is derived, not declared. The spec has a question report "whether it is required"; that
+is not a property of the question but of the run, so it is computed with the rule
+`HeadlessInteraction._resolve` already applies — a default answers a question only under
+`--accept-defaults`, never for a `DESTRUCTIVE_KEY`. For the same reason the spec's
+`default=first_choice` is `recommended=True` on the first `Choice`, which every `select`
+implementation already treats as the default; no new concept was needed.
+
+`--write-answers` writes anything still to be answered **commented out**, and a secret always. A
+key present with an empty value is found by `AnswerSources.supplied` and read as an answer of the
+empty string, so a blank entry would silently satisfy the question it was meant to leave open.
+
+`env plan` reads from a cloud where it can. The spec calls choice loaders "side-effect-free reads"
+and stops there; the question of whether `plan` performs them was open, and it does, because
+listing the regions an account really has is most of the value. Every such read is allowed to come
+to nothing — `evaluate(tolerant=True)` turns a failing loader into a note, and a failing
+`detect_account` into a partial reason — so acceptance criteria 3 and 5 still hold: `env plan`
+creates nothing and answers with an empty `PATH` and no credentials, reporting which parts of the
+list went unlisted.
 
 Three deviations from the `0f` spec. The strategy contract change is **breaking** — the five action
 methods return results and `status()` is new — where the spec left the return types unstated; there
 are no known third-party strategies and `0g` breaks the provider contract in the same release, so
-0.5.0 carries one plugin note rather than two.
+0.5.0 carries one plugin note rather than two. It also breaks GCP environments created headlessly:
+`env.zone` was silently `zones[0]` and is now a real question, so such a run needs `--zone` or
+`--accept-defaults`.
 
 And **there is no `--yes`**, which the spec's surface and the migration plan's global-options table
 both assumed. It was dropped rather than implemented: it is pure sugar over
@@ -236,8 +300,8 @@ nowhere near what it approves. Destructive keys are answered by name; `DESTRUCTI
 review editors that `setup --yes` was meant to skip have their own flag, `setup --accept-detected`,
 carried on `AnswerSources.accept_reviews` because it answers no question. The migration plan's
 tables were updated to match, since `test_flag_mapping.py` and `test_interaction_keys.py` parse
-them, and so were the six later specs that assumed the flag — `phase-1`, `phase-2`, `phase-3`,
-`phase-4`, `phase-5` and `phase-8`. Amending those is not a breach of the rule above: a spec stops
+them, and so were the six later specs that assumed the flag — `phase-2`, `phase-3`, `phase-4`,
+`phase-5`, `phase-6` and `phase-8`. Amending those is not a breach of the rule above: a spec stops
 changing *once it ships*, and none of them has been built, so they are still designs to be built
 against rather than the record of anything. The shipped `0e` and `0f` specs keep their `--yes`,
 which is what that rule is for; this paragraph is their erratum. Three of the six named no key for
@@ -259,8 +323,8 @@ Three deviations from the `0e` spec, all deliberate. `ctx.steps.once(...)` yield
 should run (`with ctx.steps.once("vm.create") as should_run:`) because a context manager cannot skip
 its own body. The ledger lives in `steps.yml` rather than `state.yml` for the reason above. And the
 answer store is outside the repository rather than a "gitignored local cache" inside it — **which
-two later specs still assume it is not**: `phase-2` negates `answers.yml` out of its gitignore block
-so it gets committed, and `phase-3` uploads it to the cloud bucket beside `deployments.yml` and
+two later specs still assume it is not**: `phase-3` negates `answers.yml` out of its gitignore block
+so it gets committed, and `phase-4` uploads it to the cloud bucket beside `deployments.yml` and
 `state.yml`. Neither spec has been amended, because a spec is not rewritten to match what was built;
 read this paragraph first when you start either.
 

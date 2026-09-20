@@ -22,6 +22,7 @@ The primary goal of Opsmith is to make cloud deployments accessible to all devel
   - [Running Opsmith without a terminal](#running-opsmith-without-a-terminal)
     - [The commands](#the-commands)
     - [Answering questions from the command line](#answering-questions-from-the-command-line)
+    - [Knowing what it will ask, first](#knowing-what-it-will-ask-first)
     - [The driver loop](#the-driver-loop)
   - [Cloud Providers](#cloud-providers)
     - [AWS](#aws-amazon-web-services)
@@ -175,6 +176,7 @@ opsmith init --app-name "My App"          # write .opsmith/deployments.yml, with
 opsmith setup --rescan --accept-detected  # detect services and generate Dockerfiles
 
 opsmith env list                          # what environments this repository declares
+opsmith env plan --provider AWS --strategy Monolithic   # what creating one will ask for
 opsmith env status --env dev              # what one of them is running
 opsmith env create --name dev --provider AWS --region us-east-1 --strategy Monolithic \
   --domain api=api.example.com --domain-email me@example.com
@@ -185,9 +187,9 @@ opsmith run     --env dev --service api -- ls -la
 opsmith --answer delete.confirm=DELETE destroy --env dev
 ```
 
-`env list` and `env status` read the repository and nothing else — no cloud call, no docker, no
-terraform — so they answer on a machine with none of that installed. `env create --no-deploy`
-writes the environment to the configuration without creating anything.
+`env list`, `env plan` and `env status` need no docker and no terraform, so they answer on a
+machine with none of that installed. `env create --no-deploy` writes the environment to the
+configuration without creating anything.
 
 `opsmith run` exits with whatever the remote command exited with, so it can stand in for the
 command itself in a script.
@@ -235,6 +237,31 @@ update.confirm_infra_changes=true` — so approving one gate never approves anot
 `--non-interactive` forces this mode; so does `--output json`, and so does a stdin that is not a
 terminal. Every answer is remembered under `~/.opsmith/projects/<name>/environments/<env>/`, so a
 re-run never asks the same question twice.
+
+#### Knowing what it will ask, first
+
+`opsmith env plan` answers that without creating anything:
+
+```shell
+opsmith env plan --provider AWS --strategy Monolithic --accept-defaults
+```
+
+It reports every answer a creation will need — the key, the question, the options where it can
+list them, the default where there is one, and the environment variable to put a secret in — and
+which of them this run would actually stop for. Nothing is created, no configuration is written,
+and it needs neither docker nor terraform. It will *read* from your cloud account where it can, to
+list the regions that account really has, but a machine with no credentials yet still gets the
+plan; it just says which parts of it went unlisted.
+
+Which questions exist depends on the cloud provider and the strategy, so a plan that has not been
+told those two reports what it can and names them as the answers to give first. Give them, run it
+again, and the branch they open is listed too. The same is true of a provider or strategy plugin
+that declares no questions: `complete` is `false` and `partial_reasons` says which one is quiet.
+
+`--write-answers FILE` writes the list as a YAML file to fill in and hand back with `--answers`.
+Anything with a default is written with it; anything still to be answered is written commented
+out, because a key present with an empty value would count as an answer of the empty string. A
+secret is always commented out — those belong in a `--env-file`.
 
 #### The driver loop
 
@@ -329,7 +356,24 @@ Opsmith has been designed with extensibility in mind, allowing you to add your o
 
 To add a new cloud provider, you need to:
 
-1.  Create a Python class that inherits from `opsmith.cloud_providers.base.BaseCloudProvider` and implements all its abstract methods (`name`, `description`, `get_detail_model`, `get_account_details`, `get_instance_types`, `get_regions`).
+1.  Create a Python class that inherits from `opsmith.cloud_providers.base.BaseCloudProvider` and implements its abstract methods (`name`, `description`, `get_detail_model`, `detect_account`, `build_detail`, `get_instance_types`).
+
+    Reaching an account is three separate things, because only the first two can happen before a
+    person is involved. `detect_account` checks that the account can be reached and reads the
+    facts that are not a matter of choice — an account id, the path to a helper — and must not
+    ask anything. `build_detail` turns that plus the answers into the record the environment
+    keeps in `deployments.yml`.
+
+    In between, `questions` declares what your provider needs chosen — a region, a project — as
+    data rather than as prompts, which is what puts it in `opsmith env plan` before a run
+    starts. Each question names the key it is answered by, and a question whose options depend
+    on an earlier answer says so with `depends_on`, so they are asked in an order that works.
+    A choice loader that cannot list its options here — no credentials yet — returns `None`
+    rather than failing, and the plan reports the question without them.
+
+    Declaring is optional. A provider that implements only the three abstract methods and asks
+    whatever it needs through `ctx.interact` inside `build_detail` works exactly as before; the
+    only thing it gives up is being listed by `env plan`, which then says its list is partial.
 2.  Package your new provider class.
 3.  In your package's `pyproject.toml`, add an entry point under the `[project.entry-points."opsmith.cloud_providers"]` group.
 
@@ -364,6 +408,11 @@ Similarly, you can add a new deployment strategy by:
     nothing has to be declared up front. Its steps must be safe to run again, because a run that
     stops for an answer resumes by repeating the command — wrap anything that is not with
     `with ctx.steps.once("name") as should_run:`.
+
+    You may also implement `questions`, listing what you are going to ask, so that `opsmith env
+    plan` can report it before a run starts. It is not a promise to ask only those, and nothing
+    is ever asked on your behalf — you still ask inline. A strategy that declares nothing is
+    reported as a partial plan and behaves exactly as it always did.
 2.  Packaging your new strategy class.
 3.  In your package's `pyproject.toml`, add an entry point under the `[project.entry-points."opsmith.deployment_strategies"]` group.
 

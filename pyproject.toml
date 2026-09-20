@@ -1,6 +1,6 @@
 [project]
 name = "opsmith-cli"
-version = "0.4.6b"
+version = "0.5.0"
 description = "Opsmith is an AI devops engineer in your terminal"
 readme = {file = "README.md", content-type = "text/markdown"}
 classifiers = [
@@ -65,7 +65,23 @@ dev = [
     "pytest>=8.4.1",
     "black>=25.1.0",
     "boto3-stubs==1.43.89",
+    "mypy>=2.3.1",
+    "types-pyyaml>=6.0.12.20260906",
 ]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+files = ["opsmith"]
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+module = "opsmith.tests.*"
+disallow_untyped_defs = false
 
 [tool.black]
 line-length = 100
