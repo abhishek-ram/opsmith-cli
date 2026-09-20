@@ -133,7 +133,7 @@ Failures are `TEMPLATE_INVALID` (exit 2) with the path and message in `details`.
 
 ### Adopting existing hand edits
 
-Projects created before this phase may carry edits inside generated directories. `template adopt --env NAME` compares each file in each working dir with the package default and, where they differ, moves the file into the environment overlay with provenance set to the current version, then re-materializes. Interactive runs confirm per file with `template.adopt.confirm`; headless runs need `--yes`.
+Projects created before this phase may carry edits inside generated directories. `template adopt --env NAME` compares each file in each working dir with the package default and, where they differ, moves the file into the environment overlay with provenance set to the current version, then re-materializes. Interactive runs confirm per file with `template.adopt.confirm`; headless runs answer it with `--answer template.adopt.confirm=true`.
 
 ### Generated-directory policy and git
 
@@ -166,8 +166,8 @@ opsmith template eject  <path> [--env NAME] [--force]
 opsmith template diff   <path> [--env NAME]
 opsmith template check  [--deep] [--strict] [--env NAME]
 opsmith template rebase <path> [--env NAME]
-opsmith template reset  <path> [--env NAME] [--yes]
-opsmith template adopt  --env NAME [--yes]
+opsmith template reset  <path> [--env NAME] [--answer template.reset.confirm=true]
+opsmith template adopt  --env NAME [--answer template.adopt.confirm=true]
 opsmith paths [--output json]                             # ownership map of .opsmith/
 ```
 

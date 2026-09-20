@@ -10,9 +10,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import ValidationError
 
 from opsmith.core.errors import InvalidConfig
+from opsmith.core.results import ConfigIssue, ValidateResult
 from opsmith.types import (
     COMPATIBLE_PROVIDERS,
     DeploymentConfig,
@@ -21,30 +22,22 @@ from opsmith.types import (
     ServiceInfo,
 )
 
-
-class ConfigIssue(BaseModel):
-    """One problem found in a configuration, at one place in it."""
-
-    path: str = Field(
-        ..., description="Where the problem is, as a dotted path such as services.0.service_port."
-    )
-    message: str = Field(..., description="What is wrong there.")
-
-
-class ValidateResult(BaseModel):
-    """What ``opsmith config validate`` found.
-
-    Part 0f moves this into ``core/results.py`` with the rest of the typed results; it is defined
-    here because it is the only one this part needs.
-    """
-
-    ok: bool = Field(..., description="Whether the configuration is usable.")
-    errors: List[ConfigIssue] = Field(
-        default_factory=list, description="Problems that stop the configuration being used."
-    )
-    warnings: List[ConfigIssue] = Field(
-        default_factory=list, description="Problems that are suspicious but not fatal."
-    )
+#: Re-exported so the editors in ``opsmith setup`` and the ``config`` commands keep importing the
+#: issue and the result from the module whose rules produce them. They live in ``core/results.py``
+#: with every other typed result.
+__all__ = [
+    "ConfigIssue",
+    "ValidateResult",
+    "check_infra_deps",
+    "config_json_schema",
+    "load_config_file",
+    "parse_infra_deps",
+    "parse_service",
+    "schema_to_markdown",
+    "validate_config_data",
+    "validate_config_file",
+    "warn_incompatible_providers",
+]
 
 
 def _dotted_path(location: Tuple[Any, ...], prefix: str = "") -> str:

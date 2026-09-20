@@ -84,7 +84,13 @@ def test_validate_accepts_a_good_configuration(runner, cli, tmp_project):
 
     assert result.exit_code == 0
     assert envelope["command"] == "config validate"
-    assert envelope["result"] == {"ok": True, "errors": [], "warnings": []}
+    assert envelope["result"] == {
+        "ok": True,
+        "errors": [],
+        "warnings": [],
+        "notices": [],
+        "next_steps": [],
+    }
 
 
 def test_validate_reports_a_schema_error_with_its_path(runner, cli, tmp_project):

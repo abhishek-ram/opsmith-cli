@@ -20,6 +20,14 @@ from opsmith.core.events import (
     BufferingSink,
 )
 from opsmith.core.interaction import Choice
+from opsmith.core.results import (
+    DestroyResult,
+    EnvCreateResult,
+    EnvStatusResult,
+    ReleaseResult,
+    RunResult,
+    UpdateResult,
+)
 from opsmith.types import (
     DeploymentConfig,
     DeploymentEnvironment,
@@ -479,8 +487,17 @@ class BaseDeploymentStrategy(abc.ABC):
         self,
         deployment_config: DeploymentConfig,
         environment: DeploymentEnvironment,
-    ):
-        """Sets up the infrastructure for the deployment."""
+    ) -> EnvCreateResult:
+        """
+        Sets up the infrastructure for the deployment.
+
+        :param deployment_config: What the repository deploys.
+        :param environment: The environment being created.
+        :return: What was created, and what DNS records it now needs. Infrastructure is reported
+            as a list of :class:`Resource`, so a strategy that raises several machines, or a
+            cluster, or nothing but a serverless service, describes what it actually made rather
+            than filling in fields shaped for a single virtual machine.
+        """
         raise NotImplementedError
 
     @abc.abstractmethod
@@ -488,8 +505,14 @@ class BaseDeploymentStrategy(abc.ABC):
         self,
         deployment_config: DeploymentConfig,
         environment: DeploymentEnvironment,
-    ):
-        """Deploys the application."""
+    ) -> ReleaseResult:
+        """
+        Deploys the application.
+
+        :param deployment_config: What the repository deploys.
+        :param environment: The environment being released to.
+        :return: What was built and released, and whether it came up healthy.
+        """
         raise NotImplementedError
 
     @abc.abstractmethod
@@ -497,8 +520,14 @@ class BaseDeploymentStrategy(abc.ABC):
         self,
         deployment_config: DeploymentConfig,
         environment: DeploymentEnvironment,
-    ):
-        """Destroys the environment's infrastructure."""
+    ) -> DestroyResult:
+        """
+        Destroys the environment's infrastructure.
+
+        :param deployment_config: What the repository deploys.
+        :param environment: The environment being destroyed.
+        :return: What was torn down, as the same resources ``deploy`` reported creating.
+        """
         raise NotImplementedError
 
     @abc.abstractmethod
@@ -508,8 +537,19 @@ class BaseDeploymentStrategy(abc.ABC):
         environment: DeploymentEnvironment,
         service_name_slug: str,
         command: str,
-    ):
-        """Runs a command on a specific service."""
+    ) -> RunResult:
+        """
+        Runs a command on a specific service.
+
+        :param deployment_config: What the repository deploys.
+        :param environment: The environment the command runs in.
+        :param service_name_slug: The service to run it on.
+        :param command: The command to run.
+        :return: What the command exited with, what it wrote, and where it ran. Opsmith exits with
+            that code, so a script driving ``opsmith run`` reads the same status it would have
+            read had it run the command itself. A strategy with more than one place to run a
+            command picks one and reports which in ``target``.
+        """
         raise NotImplementedError
 
     @abc.abstractmethod
@@ -517,6 +557,33 @@ class BaseDeploymentStrategy(abc.ABC):
         self,
         deployment_config: DeploymentConfig,
         environment: DeploymentEnvironment,
-    ):
-        """Updates service configuration for an existing deployment."""
+    ) -> UpdateResult:
+        """
+        Updates service configuration for an existing deployment.
+
+        :param deployment_config: What the repository deploys.
+        :param environment: The environment being updated.
+        :return: What changed, or why nothing did. An update that finds no changes, or that the
+            user declines, still returns a result: it did not fail, it did nothing.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def status(
+        self,
+        deployment_config: DeploymentConfig,
+        environment: DeploymentEnvironment,
+    ) -> EnvStatusResult:
+        """
+        Reports what this environment is running, without touching a cloud.
+
+        The state file is the strategy's own - a monolithic environment keeps a machine and a
+        registry, another strategy would keep something else - so only the strategy can read it.
+        Nothing here may shell out or call an API: ``opsmith env status`` declares no external
+        tools and is expected to answer on a machine with an empty PATH.
+
+        :param deployment_config: What the repository deploys.
+        :param environment: The environment being reported on.
+        :return: What the last deploy or update left behind.
+        """
         raise NotImplementedError

@@ -31,16 +31,21 @@ from dotenv import dotenv_values
 from opsmith.core.errors import InvalidArgument
 from opsmith.core.events import STEP_INTERACT, EventSink, resolve_sink
 
-#: The word the deletion gate asks to be typed. Declared here so the command that asks and the
-#: headless resolver that stands in for the typing cannot disagree about it.
+#: The word the deletion gate asks to be typed, at a terminal or through
+#: ``--answer delete.confirm=DELETE``. Declared here so the command that asks, the error that says
+#: what was expected, and whatever a driver reads cannot disagree about it.
 DELETE_CONFIRMATION = "DELETE"
 
-#: What ``--yes`` answers, per key that gates something destructive. It is a mapping rather than a
-#: set because not every gate is a yes or no question: the deletion gate is an ``ask`` that wants a
-#: word typed, and a terminal keeps that friction.
-DESTRUCTIVE_ANSWERS: Dict[str, Any] = {
-    "delete.confirm": DELETE_CONFIRMATION,
-    "update.confirm_infra_changes": True,
+#: The keys that gate something irreversible. There is no blanket flag that answers them: each is
+#: named and answered on its own, with ``--answer delete.confirm=DELETE``, because approving every
+#: gate in a run at once is exactly the thing that should not be one keystroke.
+#:
+#: What this set still does is refuse a default. A question here is never answered by
+#: ``--accept-defaults`` and its answer is never persisted, so neither a blanket "take the
+#: defaults" nor a previous run can destroy anything on its own.
+DESTRUCTIVE_KEYS: Set[str] = {
+    "delete.confirm",
+    "update.confirm_infra_changes",
 }
 
 #: Keys whose answers must never be persisted. A menu choice describes one invocation, not the
@@ -51,7 +56,7 @@ TRANSIENT_KEYS: Set[str] = {
     "env.action",
     "run.service",
     "run.command",
-} | set(DESTRUCTIVE_ANSWERS)
+} | DESTRUCTIVE_KEYS
 
 #: Prefix of the environment variable that answers a key.
 ENVIRONMENT_PREFIX = "OPSMITH_ANSWER_"
@@ -72,7 +77,6 @@ SOURCE_ANSWERS_FILE = "--answers"
 SOURCE_ENVIRONMENT = "environment"
 SOURCE_STORE = "the answer store"
 SOURCE_DEFAULT = "--accept-defaults"
-SOURCE_YES = "--yes"
 
 
 def environment_variable_for(key: str) -> str:
@@ -173,7 +177,7 @@ class AnswerSources:
     answers_file: Dict[str, Any] = field(default_factory=dict)
     environ: Mapping[str, str] = field(default_factory=dict)
     accept_defaults: bool = False
-    assume_yes: bool = False
+    accept_reviews: bool = False
 
     @classmethod
     def load(
@@ -183,7 +187,7 @@ class AnswerSources:
         answers_path: Optional[Path] = None,
         env_path: Optional[Path] = None,
         accept_defaults: bool = False,
-        assume_yes: bool = False,
+        accept_reviews: bool = False,
         environ: Optional[Mapping[str, str]] = None,
     ) -> "AnswerSources":
         """
@@ -193,7 +197,9 @@ class AnswerSources:
         :param answers_path: The file named by ``--answers``.
         :param env_path: The file named by ``--env-file``.
         :param accept_defaults: Whether a question may fall back to its own default.
-        :param assume_yes: Whether destructive confirmations are accepted up front.
+        :param accept_reviews: Whether a review editor takes its proposal without opening. It is
+            not an answer to anything - the proposal is what it was going to be - so it is a switch
+            here rather than a key in ``inline``.
         :param environ: The environment to read ``OPSMITH_ANSWER_*`` from. Defaults to the process
             environment; supplied by tests that must not depend on one.
         :return: The sources, ready to be consulted.
@@ -205,7 +211,7 @@ class AnswerSources:
             answers_file=load_answers_file(answers_path) if answers_path else {},
             environ=environ if environ is not None else os.environ,
             accept_defaults=accept_defaults,
-            assume_yes=assume_yes,
+            accept_reviews=accept_reviews,
         )
 
     def supplied(self, key: str) -> Tuple[bool, Any, str]:

@@ -538,17 +538,37 @@ def test_accept_defaults_does_not_invent_an_answer_nobody_offered(headless):
         headless(accept_defaults=True).select("env.region", "Which region", plain)
 
 
-def test_yes_answers_the_confirmation_that_guards_an_update(headless):
-    """`--yes` is how somebody says in advance that they accept what the run is about to change."""
-    assert headless(assume_yes=True).confirm("update.confirm_infra_changes", "Continue?") is True
+def test_a_destructive_gate_is_answered_by_naming_it(headless):
+    """
+    There is no blanket flag for these. Approving what a run is about to change means saying so
+    for that gate, by key, which is the same mechanism every other answer uses.
+    """
+    interact = headless(inline={"update.confirm_infra_changes": "true"})
+
+    assert interact.confirm("update.confirm_infra_changes", "Continue?") is True
 
 
-def test_yes_types_the_word_the_deletion_gate_asks_for(headless):
+def test_the_deletion_gate_still_wants_its_word(headless):
     """
-    On a terminal the gate asks for a word to be typed, and that friction stays. `--yes` is what
-    stands in for the typing when there is nobody to type.
+    On a terminal the gate asks for a word to be typed, and that friction stays. Without a person
+    the word is supplied the same way, by key, rather than by a flag that means "whatever it asks".
     """
-    assert headless(assume_yes=True).ask("delete.confirm", "Type DELETE") == "DELETE"
+    interact = headless(inline={"delete.confirm": "DELETE"})
+
+    assert interact.ask("delete.confirm", "Type DELETE") == "DELETE"
+
+
+def test_nothing_blanket_answers_a_destructive_gate(headless):
+    """
+    The point of removing the blanket flag: a run told to take every shortcut it can still stops
+    at the gate, because destroying an environment is not a shortcut anybody can take in advance.
+    """
+    interact = headless(accept_defaults=True)
+
+    with pytest.raises(MissingAnswerError) as raised:
+        interact.ask("delete.confirm", "Type DELETE")
+
+    assert raised.value.details["key"] == "delete.confirm"
 
 
 def test_accept_defaults_does_not_agree_to_something_destructive(headless):
@@ -564,7 +584,9 @@ def test_accept_defaults_does_not_agree_to_something_destructive(headless):
 
 def test_a_destructive_confirmation_is_never_remembered(headless, store: AnswerStore):
     """Otherwise every later run would destroy without being asked."""
-    headless(assume_yes=True).confirm("update.confirm_infra_changes", "Continue?")
+    headless(inline={"update.confirm_infra_changes": "true"}).confirm(
+        "update.confirm_infra_changes", "Continue?"
+    )
 
     assert store.get("update.confirm_infra_changes") is None
 
@@ -685,7 +707,35 @@ def test_what_the_run_tells_the_user_is_kept_for_the_report(headless):
     interact = headless()
     interact.notify("Your site is live", details={"next_steps": ["point your domain at it"]})
 
-    assert interact.notices == [
+    assert [notice.model_dump() for notice in interact.notices] == [
         {"message": "Your site is live", "details": {"next_steps": ["point your domain at it"]}}
     ]
-    assert interact.next_steps == [["point your domain at it"]]
+    assert interact.next_steps == ["point your domain at it"]
+
+
+@pytest.mark.parametrize("field", ["message", "step", "kind", "data"])
+def test_a_notice_whose_details_are_named_after_the_event_still_reports(headless, renderer, field):
+    """
+    Details are spread across the event's data, so one named after a field of the event itself
+    used to pass that field twice and raise. A ConfigIssue has a message, and reporting a problem
+    with an edited service is exactly the path that hits it, so the nesting is not theoretical.
+    """
+    interact = headless()
+
+    interact.notify("Invalid service configuration", details={field: "services.0.service_port"})
+
+    reported = renderer.events[-1]
+    assert reported.message == "Invalid service configuration"
+    assert reported.data == {"details": {field: "services.0.service_port"}}
+
+
+def test_details_that_cannot_collide_are_still_reported_by_name(headless, renderer):
+    """
+    The nesting above is only for the names that would collide. Everything else stays spread, so
+    a reader of the event stream sees the fields the caller named.
+    """
+    interact = headless()
+
+    interact.notify("Waiting on DNS", details={"records": [{"type": "A"}]})
+
+    assert renderer.events[-1].data == {"records": [{"type": "A"}]}

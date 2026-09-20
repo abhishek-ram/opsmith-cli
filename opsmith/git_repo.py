@@ -3,12 +3,35 @@ import tarfile
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Iterator, List, Optional
 
-import git
-
-from opsmith.core.errors import NotAGitRepository
+from opsmith.core.errors import GitNotAvailable, NotAGitRepository
 from opsmith.core.events import STEP_BUILD, STEP_SETUP, EventSink, resolve_sink
+
+
+def _import_git() -> Any:
+    """
+    Imports GitPython, which looks for the git executable while it is being imported.
+
+    That search is why this is not an import at the top of the module: it raises when it finds
+    nothing, and a module-level import would therefore make importing any part of Opsmith fail on
+    a machine without git - long before anything asked for a repository. ``opsmith env list`` and
+    ``opsmith env status`` read files this package wrote and need no tooling at all, so the cost
+    of git is paid here, where a repository is actually being opened.
+
+    :return: The ``git`` module.
+    :raises GitNotAvailable: git is not installed, or is not on the PATH.
+    """
+    try:
+        import git
+    except ImportError as err:
+        raise GitNotAvailable(
+            "git is not installed, or is not on the PATH.",
+            hint="Install git and make sure it is on your PATH, then run the command again.",
+            details={"problem": str(err).splitlines()[0]},
+        ) from err
+
+    return git
 
 
 class GitRepo:
@@ -25,11 +48,12 @@ class GitRepo:
             contain a valid Git repository.
         """
         self.events = resolve_sink(events)
+        self._git = _import_git()
         try:
             # Initialize repo object, searching upwards from root_dir if it's a subdirectory
-            self.repo = git.Repo(str(root_dir), search_parent_directories=True)
+            self.repo = self._git.Repo(str(root_dir), search_parent_directories=True)
 
-        except git.exc.InvalidGitRepositoryError:
+        except self._git.exc.InvalidGitRepositoryError:
             raise NotAGitRepository(
                 f"'{root_dir}' is not a git repository, or git is not found in PATH.",
                 hint=(
@@ -38,6 +62,26 @@ class GitRepo:
                 ),
                 details={"src_dir": str(root_dir)},
             )
+
+    @contextmanager
+    def _reporting_a_missing_git(self) -> Iterator[None]:
+        """
+        Turns a missing git executable into an error the CLI can map, wherever Opsmith shells out.
+
+        Opening a repository only reads the files under ``.git``, so it succeeds on a machine with
+        no git at all; the binary is not needed until something asks git to do something. Without
+        this, that would surface as an unhandled exception and be reported as a bug in Opsmith.
+
+        :raises GitNotAvailable: git could not be run.
+        """
+        try:
+            yield
+        except self._git.exc.GitCommandNotFound as err:
+            raise GitNotAvailable(
+                "git is installed but could not be run.",
+                hint="Check that git works, and that it is on the PATH this command was given.",
+                details={"problem": str(err).splitlines()[0]},
+            ) from err
 
     def get_git_tracked_files(self, src_dirs: List[str]) -> List[Path]:
         """
@@ -65,7 +109,8 @@ class GitRepo:
         ls_files_args = ["-c", "--exclude-standard"]
         ls_files_args.extend(src_dirs)
 
-        tracked_files_str = self.repo.git.ls_files(*ls_files_args)
+        with self._reporting_a_missing_git():
+            tracked_files_str = self.repo.git.ls_files(*ls_files_args)
 
         if not tracked_files_str:  # Handle case where there are no tracked files
             return []
@@ -82,7 +127,8 @@ class GitRepo:
         self.events.log(STEP_BUILD, "Creating build context from git-tracked files...")
         with tempfile.TemporaryDirectory() as temp_dir:
             buf = io.BytesIO()
-            self.repo.archive(buf, format="tar")
+            with self._reporting_a_missing_git():
+                self.repo.archive(buf, format="tar")
             buf.seek(0)
             with tarfile.open(fileobj=buf) as tar:
                 tar.extractall(path=temp_dir)

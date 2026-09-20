@@ -31,6 +31,7 @@ from opsmith.core.errors import (
     AnsibleFailed,
     MissingAnswerError,
     PendingActionError,
+    UnknownEnvironment,
 )
 from opsmith.core.interaction import HeadlessInteraction
 from opsmith.deployment_strategies.monolithic import (
@@ -892,6 +893,41 @@ def test_a_build_time_secret_reaches_the_build_and_nowhere_else(
     assert not answers_file.is_relative_to(context.deployments_path)
 
 
+def test_a_frontend_deploy_reports_its_delivery_network_as_a_resource(
+    headless_ctx, frontend_config, frontend_environment, provisioners
+):
+    """
+    A frontend is served by a content delivery network rather than by the machine, so it is a
+    resource of its own - and one an environment can hold several of, one per frontend service.
+    Reporting it is what lets a driver find the distribution it has to invalidate.
+    """
+    context = headless_ctx(
+        inline={
+            "env.instance_type": "t4g.medium",
+            "build_env.react_web_1.VITE_API_URL": "https://api.example.test",
+            "build_env.react_web_1.VITE_ANALYTICS_TOKEN": "tok",
+        },
+        env_file={"envvar.DATABASE_URL": "postgres://supplied/db"},
+    )
+
+    result = _headless_strategy(context).deploy(frontend_config, frontend_environment)
+
+    networks = [r for r in result.resources if r.kind == "content_delivery_network"]
+    assert len(networks) == 1
+    assert networks[0].id == "E123"
+    assert networks[0].name == FRONTEND_SLUG
+    assert networks[0].address == "d123.cloudfront.test"
+    assert networks[0].details["bucket_name"] == "acme-app-www"
+    assert networks[0].details["certificate_id"] == "cert-123"
+
+    # The machine is still reported alongside it: an environment holds both.
+    assert [r.kind for r in result.resources] == [
+        "content_delivery_network",
+        "container_registry",
+        "virtual_machine",
+    ]
+
+
 def test_an_older_state_file_hands_its_build_values_over_rather_than_losing_them(
     headless_ctx, frontend_config, frontend_environment, provisioners
 ):
@@ -918,3 +954,240 @@ def test_an_older_state_file_hands_its_build_values_over_rather_than_losing_them
 
     assert collected == {"VITE_API_URL": "https://old", "VITE_ANALYTICS_TOKEN": "old-token"}
     assert "old-token" not in yaml.dump(legacy.model_dump(mode="json"))
+
+
+# --- what the strategy hands back ------------------------------------------------------------
+
+
+def test_deploy_returns_what_it_created(strategy, deployment_config, environment):
+    """
+    Every fact a driver needs after creating an environment is in the result: the machine, the
+    registry, where the service is reachable and the record somebody had to create to make it so.
+    Before this the same facts existed only inside an event message.
+    """
+    result = strategy.deploy(deployment_config, environment)
+
+    assert result.environment == "prod"
+    assert result.provider == "FAKE"
+    assert result.region == "us-test-1"
+    assert result.strategy == "Monolithic"
+    assert result.registry_url == REGISTRY_URL
+
+    # The machine is one entry in a list rather than a pair of fields, so a strategy that raises
+    # several of them has somewhere to report them all.
+    by_kind = {resource.kind: resource for resource in result.resources}
+    assert set(by_kind) == {"container_registry", "virtual_machine"}
+
+    machine = by_kind["virtual_machine"]
+    assert machine.id == "i-0123456789"
+    assert machine.size == "t4g.medium"
+    assert machine.address == "203.0.113.10"
+    assert machine.region == "us-test-1"
+    assert machine.details["user"] == "ubuntu"
+    assert machine.details["private_ip"] == "10.0.0.10"
+    assert by_kind["container_registry"].address == REGISTRY_URL
+
+    assert result.urls == {SERVICE_SLUG: "https://api.example.test"}
+    assert [(r.type, r.name, r.value) for r in result.dns_records] == [
+        ("A", "api.example.test", "203.0.113.10")
+    ]
+
+
+def test_release_returns_what_it_built_and_whether_it_came_up(
+    strategy, deployment_config, environment
+):
+    """
+    A release reports the image it pushed and the model's verdict on the container logs, so a
+    harness can tell a deployment that came up from one that merely finished.
+    """
+    strategy.deploy(deployment_config, environment)
+
+    result = strategy.release(deployment_config, environment)
+
+    assert result.environment == "prod"
+    assert result.images == {SERVICE_SLUG: IMAGE_URL}
+    assert result.services == [SERVICE_SLUG]
+    assert result.validated is True
+    assert result.validation_reason is None
+    assert result.urls == {SERVICE_SLUG: "https://api.example.test"}
+
+
+def test_update_with_nothing_to_change_says_so_rather_than_failing(
+    strategy, deployment_config, environment
+):
+    """
+    Running update twice is not an error the second time, it is a no-op - and a no-op that says
+    which it was, so a driver does not have to guess from an empty event stream.
+    """
+    strategy.deploy(deployment_config, environment)
+
+    result = strategy.update(deployment_config, environment)
+
+    assert result.applied is False
+    assert result.reason == "No configuration changes detected."
+    assert result.environment == "prod"
+
+
+def test_destroy_returns_what_it_tore_down(strategy, deployment_config, environment):
+    """
+    Destroy names what it removed, in the order it removed it, so a run that stopped half way can
+    be told apart from one that removed nothing.
+    """
+    strategy.deploy(deployment_config, environment)
+
+    result = strategy.destroy(deployment_config, environment)
+
+    assert result.environment == "prod"
+    assert [(r.kind, r.id) for r in result.destroyed] == [
+        ("virtual_machine", "i-0123456789"),
+        ("working_directory", str(strategy.deployments_path / "environments" / "prod")),
+        ("container_registry", REGISTRY_URL),
+    ]
+
+
+def test_destroying_an_environment_that_was_never_deployed_removes_nothing(
+    strategy, deployment_config, environment
+):
+    """There is no state file, so there is nothing to tear down and nothing to report."""
+    result = strategy.destroy(deployment_config, environment)
+
+    assert result.destroyed == []
+
+
+def test_status_reads_the_state_file_without_touching_a_provisioner(
+    strategy, deployment_config, environment, provisioners
+):
+    """
+    Status is what `opsmith env status` calls, and that command declares no external tools - so
+    this must answer from the state file alone. The factory records every call, and there are none.
+    """
+    strategy.deploy(deployment_config, environment)
+    provisioners.calls.clear()
+
+    result = strategy.status(deployment_config, environment)
+
+    assert provisioners.actions() == []
+    assert result.deployed is True
+    assert result.registry_url == REGISTRY_URL
+    assert [(r.kind, r.address) for r in result.resources] == [
+        ("container_registry", REGISTRY_URL),
+        ("virtual_machine", "203.0.113.10"),
+    ]
+    assert [(s.name_slug, s.url) for s in result.services] == [
+        (SERVICE_SLUG, "https://api.example.test")
+    ]
+    assert result.urls == {SERVICE_SLUG: "https://api.example.test"}
+
+
+def test_status_of_an_environment_that_was_never_deployed_says_so(
+    strategy, deployment_config, environment
+):
+    """
+    Asking after an environment that has not been deployed is reasonable, so it answers rather
+    than failing: everything the configuration knows, and deployed false.
+    """
+    result = strategy.status(deployment_config, environment)
+
+    assert result.deployed is False
+    assert result.environment == "prod"
+    assert result.region == "us-test-1"
+    assert result.resources == []
+    assert result.services == []
+
+
+# --- running a command on a deployed service ---------------------------------------------------
+
+
+def _run_outputs(rc: int, stdout: str = "", stderr: str = "") -> dict:
+    """
+    Builds what the run playbook hands back through its markers.
+
+    :param rc: The exit status of the remote command.
+    :param stdout: What it wrote to stdout.
+    :param stderr: What it wrote to stderr.
+    :return: The outputs the provisioner would have parsed out of the playbook's output.
+    """
+    return {
+        "rc": str(rc),
+        "stdout": base64.b64encode(stdout.encode("utf-8")).decode("ascii"),
+        "stderr": base64.b64encode(stderr.encode("utf-8")).decode("ascii"),
+    }
+
+
+@pytest.mark.parametrize("exit_code", [0, 1, 7])
+def test_run_reports_the_exit_status_of_the_command_it_ran(
+    ctx, deployment_config, environment, exit_code
+):
+    """
+    The playbook no longer fails on a non-zero exit: it hands the status back, and the strategy
+    reports it, so `opsmith run` can exit with it. A failing command is not a failing opsmith.
+    """
+    ctx.provisioner_factory = FakeProvisionerFactory(
+        terraform_outputs={},
+        ansible_outputs={"docker_compose_run": _run_outputs(exit_code, "hello\n", "oops\n")},
+    )
+    strategy = MonolithicDeploymentStrategy(ctx)
+    _write_state_file(ctx)
+
+    result = strategy.run(deployment_config, environment, SERVICE_SLUG, "ls -la")
+
+    assert result.exit_code == exit_code
+    assert result.process_exit_code == exit_code
+    assert result.stdout_tail == "hello\n"
+    assert result.stderr_tail == "oops\n"
+    assert result.service == SERVICE_SLUG
+    assert result.command == "ls -la"
+    assert result.target == "203.0.113.10"
+
+
+def test_run_against_an_older_playbook_that_reports_nothing_reads_as_success(
+    ctx, deployment_config, environment
+):
+    """
+    A working directory left over from before the playbook emitted markers reports no status. It
+    also still fails the playbook on a non-zero exit, so reaching here at all means it succeeded.
+    """
+    ctx.provisioner_factory = FakeProvisionerFactory(
+        terraform_outputs={}, ansible_outputs={"docker_compose_run": {}}
+    )
+    strategy = MonolithicDeploymentStrategy(ctx)
+    _write_state_file(ctx)
+
+    result = strategy.run(deployment_config, environment, SERVICE_SLUG, "ls")
+
+    assert result.exit_code == 0
+    assert result.stdout_tail == ""
+
+
+def test_run_without_a_machine_is_an_unknown_environment(ctx, deployment_config, environment):
+    """Running a command needs somewhere to run it; an environment with no machine has nowhere."""
+    strategy = MonolithicDeploymentStrategy(ctx)
+    _write_state_file(ctx, with_machine=False)
+
+    with pytest.raises(UnknownEnvironment):
+        strategy.run(deployment_config, environment, SERVICE_SLUG, "ls")
+
+
+def _write_state_file(ctx, with_machine: bool = True):
+    """
+    Writes the state a run needs, without deploying anything to produce it.
+
+    :param ctx: The context whose deployments directory the file belongs in.
+    :param with_machine: Whether the environment has a machine to run commands on.
+    """
+    state = {"registry_url": REGISTRY_URL}
+    if with_machine:
+        state["virtual_machine"] = {
+            "cpu": 2,
+            "ram_gb": 4.0,
+            "instance_type": "t4g.medium",
+            "architecture": "arm64",
+            "public_ip": "203.0.113.10",
+            "private_ip": "10.0.0.10",
+            "user": "ubuntu",
+            "instance_id": "i-0123456789",
+        }
+
+    path = ctx.deployments_path / "environments" / "prod" / "state.yml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.dump(state), encoding="utf-8")

@@ -19,6 +19,10 @@ The primary goal of Opsmith is to make cloud deployments accessible to all devel
 - [User Guide](#user-guide)
   - [LLMs](#llms)
     - [Supported Models](#supported-models)
+  - [Running Opsmith without a terminal](#running-opsmith-without-a-terminal)
+    - [The commands](#the-commands)
+    - [Answering questions from the command line](#answering-questions-from-the-command-line)
+    - [The driver loop](#the-driver-loop)
   - [Cloud Providers](#cloud-providers)
     - [AWS](#aws-amazon-web-services)
     - [GCP](#gcp-google-cloud-platform)
@@ -158,6 +162,100 @@ opsmith config schema --format markdown > SCHEMA.md
 
 Add `--output json` to any command for a single JSON document on stdout, with progress on stderr.
 
+### Running Opsmith without a terminal
+
+`opsmith setup` and `opsmith deploy` are menus, meant for a person. Everything they can do is also
+a subcommand that takes flags, returns a typed result and never prompts — which is what a script,
+a CI job or a coding agent should drive.
+
+#### The commands
+
+```shell
+opsmith init --app-name "My App"          # write .opsmith/deployments.yml, without scanning
+opsmith setup --rescan --accept-detected  # detect services and generate Dockerfiles
+
+opsmith env list                          # what environments this repository declares
+opsmith env status --env dev              # what one of them is running
+opsmith env create --name dev --provider AWS --region us-east-1 --strategy Monolithic \
+  --domain api=api.example.com --domain-email me@example.com
+
+opsmith release --env dev                 # build the current code and deploy it
+opsmith update  --env dev                 # reconcile a deployed environment with the config
+opsmith run     --env dev --service api -- ls -la
+opsmith --answer delete.confirm=DELETE destroy --env dev
+```
+
+`env list` and `env status` read the repository and nothing else — no cloud call, no docker, no
+terraform — so they answer on a machine with none of that installed. `env create --no-deploy`
+writes the environment to the configuration without creating anything.
+
+`opsmith run` exits with whatever the remote command exited with, so it can stand in for the
+command itself in a script.
+
+Every command accepts `--output json`, which writes exactly one document to stdout and sends all
+progress to stderr:
+
+```json
+{"ok": true,  "command": "env create", "result": {"resources": [{"kind": "virtual_machine", "id": "i-0abc", "address": "203.0.113.10", "size": "t4g.small"}], "urls": {"api": "https://api.example.com"}}, "warnings": []}
+{"ok": false, "command": "env create", "error": {"code": "MISSING_ANSWER", "message": "...", "hint": "...", "details": {"key": "env.region", "choices": ["us-east-1", "..."], "resume": "opsmith env create --name dev"}}}
+```
+
+| Exit code | Meaning |
+|----------:|---------|
+| 0 | success |
+| 1 | unexpected failure |
+| 2 | usage or validation error |
+| 3 | the run needs an answer it does not have |
+| 4 | an external tool failed: terraform, ansible or docker |
+| 5 | cloud credentials or permissions |
+| 6 | a model step could not produce a usable result |
+| 7 | state conflict |
+| 8 | something outside Opsmith has to happen first |
+
+#### Answering questions from the command line
+
+Every question Opsmith asks has a stable key, and every flag above is shorthand for answering one:
+`--region us-east-1` is `--answer env.region=us-east-1`. Answers may also come from a file, a
+dotenv file or the environment, in this order:
+
+| Option | Answers |
+|--------|---------|
+| `--answer key=value` | one question, repeatable, and wins over everything else |
+| `--env-file <file>` | the `envvar.<KEY>` questions, secrets included |
+| `--answers <file>` | a YAML mapping of key to answer |
+| `OPSMITH_ANSWER_<KEY>` | one question, with dots upper-cased into underscores |
+| `--accept-defaults` | each question's own default, where it has one |
+| `--accept-detected` | `setup` only: the detected services and dependencies, without opening an editor per service |
+
+There is no blanket "say yes to everything" flag, and that is deliberate. Anything irreversible is
+approved by naming it — `--answer delete.confirm=DELETE`, `--answer
+update.confirm_infra_changes=true` — so approving one gate never approves another, and
+`--accept-defaults` refuses these keys outright.
+
+`--non-interactive` forces this mode; so does `--output json`, and so does a stdin that is not a
+terminal. Every answer is remembered under `~/.opsmith/projects/<name>/environments/<env>/`, so a
+re-run never asks the same question twice.
+
+#### The driver loop
+
+Nothing has to be planned up front. Run the command; if it stops, do the one thing it asks for and
+run it again:
+
+- **Exit 3** — a question had no answer. `error.details` names the `key`, the `choices` it must come
+  from, and `resume`: the same command, ready to run again once the answer is added.
+- **Exit 8** — something outside Opsmith has to happen first, such as a DNS record being created.
+  `error.details` says what, and `resume` is the command that picks up where it stopped.
+
+```shell
+until opsmith --output json env create --name dev --provider AWS > result.json; do
+  case $? in
+    3) ;;   # read result.json for the key, add --answer, run again
+    8) ;;   # create the records it names, run again
+    *) break ;;
+  esac
+done
+```
+
 ### Tracing
 
 Tracing through [Logfire](https://logfire.pydantic.dev/) is an optional extra:
@@ -248,7 +346,24 @@ Once your package is installed in the same environment as `opsmith-cli`, Opsmith
 
 Similarly, you can add a new deployment strategy by:
 
-1.  Creating a Python class that inherits from `opsmith.deployment_strategies.base.BaseDeploymentStrategy` and implements its abstract methods (`name`, `description`, `deploy`, `release`, `destroy`, `run`).
+1.  Creating a Python class that inherits from `opsmith.deployment_strategies.base.BaseDeploymentStrategy` and implements its abstract methods (`name`, `description`, `deploy`, `release`, `update`, `run`, `destroy`, `status`).
+
+    The five action methods each return a result model from `opsmith.core.results` describing what
+    they did — the infrastructure and urls for `deploy`, the images and verdict for `release`, the
+    exit code for `run`, and so on — which is what the CLI puts in the JSON envelope. `status`
+    reports what the environment is running by reading its own state file, and must not contact a
+    cloud.
+
+    Infrastructure is reported as a list of `Resource`, never as named fields like a public IP, so
+    a strategy that raises several machines, deploys to a cluster, or creates nothing a person
+    could SSH into describes what it actually made. Each one carries a `kind` — a `ResourceKind`
+    value where one fits, or your own word where none does — an `id`, and whatever of `name`,
+    `region`, `address`, `size` and `details` applies.
+
+    A strategy asks the user whatever it needs, wherever it needs it, through `ctx.interact`;
+    nothing has to be declared up front. Its steps must be safe to run again, because a run that
+    stops for an answer resumes by repeating the command — wrap anything that is not with
+    `with ctx.steps.once("name") as should_run:`.
 2.  Packaging your new strategy class.
 3.  In your package's `pyproject.toml`, add an entry point under the `[project.entry-points."opsmith.deployment_strategies"]` group.
 

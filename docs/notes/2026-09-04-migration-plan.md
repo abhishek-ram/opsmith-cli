@@ -98,9 +98,17 @@ Global options, available on every command:
 | `--env-file <file>` | Dotenv file whose entries answer `envvar.<KEY>` keys, secrets included. |
 | `--accept-defaults` | Take each question's default instead of failing on it. Destructive confirmations are excluded. |
 | `--wait-timeout <seconds>` | How long a headless run polls an external action before exiting with `PENDING_ACTION`. Default 600. |
-| `--yes` | Accept destructive confirmations. Replaces the typed `DELETE` prompt. |
 | `--model`, `--api-key` | Required, as today. Headless runs may supply them through `OPSMITH_MODEL` and the provider's API key env var that `models.py` already reads, so no secret needs to be on the command line. A missing or unknown model is `INVALID_ARGUMENT` (exit 2). |
 | `--src-dir` | Unchanged. |
+
+**There is deliberately no `--yes`.** A draft of this table carried one, meaning "accept every
+destructive confirmation in this run". It was dropped in phase 0f for two reasons. It was pure
+sugar — `--answer delete.confirm=DELETE` already says the same thing, precisely, for one gate
+rather than all of them — and a flag that generic cannot be read at the call site: `opsmith --yes
+destroy --env dev` puts the approval nowhere near the thing it approves, and nothing about the
+word says which of a run's confirmations it covers. Destructive keys are therefore answered by
+name, and `--accept-defaults` still refuses them, so no blanket option approves an irreversible
+action.
 
 JSON envelope on stdout:
 
@@ -144,7 +152,7 @@ Core code never prompts directly. It calls one interaction API, inline wherever 
 | Primitive | Terminal | Headless |
 |-----------|----------|----------|
 | `ask`, `select` | prompt | answer from flags, env file, answers file, env vars or the persisted answer store; default with `--accept-defaults`; else exit 3 with key, choices, default and the resume command |
-| `confirm` | prompt | `--yes` or an explicit answer; destructive keys never default; else exit 3 |
+| `confirm` | prompt | an explicit answer for that key; destructive keys never take a default and have no blanket flag; else exit 3 |
 | `edit` | editor | review editors accept the proposal; fix editors exit 4 with the path and the validate command |
 | `wait_for` | show details, poll, keypress re-checks | poll until `--wait-timeout`, then exit 8 with the details and the resume command |
 | `notify` | print | collected into the result's `notices` and `next_steps` |
@@ -157,8 +165,8 @@ Stable keys used by the interaction API. Flags map onto these, and an answers fi
 |-----|----------|---------------|
 | `app.name` | `init`, `setup` | `--app-name` |
 | `setup.action` | `setup` when config exists | `--rescan` |
-| `service.<slug>.confirm` | `setup` editor review | accepted as-is when non-interactive |
-| `infra_deps.confirm` | `setup` editor review | accepted as-is when non-interactive |
+| `service.<slug>.confirm` | `setup` editor review | `--accept-detected`; accepted as-is when non-interactive |
+| `infra_deps.confirm` | `setup` editor review | `--accept-detected`; accepted as-is when non-interactive |
 | `env.name` | `env create` | `--name` |
 | `env.cloud_provider` | `env create` | `--provider` |
 | `env.strategy` | `env create` | `--strategy` |
@@ -166,22 +174,22 @@ Stable keys used by the interaction API. Flags map onto these, and an answers fi
 | `env.project_id`, `env.zone` | GCP provider | `--project-id`, `--zone` |
 | `env.instance_type` | monolithic | `--instance-type` |
 | `env.workload.tier`, `env.workload.description`, `env.workload.<field>` | `env create`, `update` (phase 1) | `--workload-tier`, `--workload`, generic `--answer` |
-| `env.capacity.confirm` | `env create`, `update`, `env resize` (phase 1) | `--yes` |
+| `env.capacity.confirm` | `env create`, `update`, `env resize` (phase 1) | `--answer env.capacity.confirm=true` |
 | `env.domain_email` | `env create`, `update` | `--domain-email` |
 | `env.domain.<slug>` | `env create`, `update` | `--domain slug=host` |
 | `env.state_backend` | `env create` (phase 3) | `--state cloud\|local` |
 | `envvar.<KEY>` | compose env confirmation | `--env-var KEY=VALUE` |
 | `build_env.<slug>.<KEY>` | frontend build env | `--build-env slug:KEY=VALUE` |
-| `dns.confirm` | the DNS confirmation as it stands today, over every record at once | `--yes` |
-| `dns.<slug>` | `wait_for` once the records are known, replacing `dns.confirm` | run again after creating the records; `--yes` only where the strategy cannot verify |
+| `dns.confirm` | the DNS confirmation as it stands today, over every record at once | `--answer dns.confirm=true` |
+| `dns.<slug>` | `wait_for` once the records are known, replacing `dns.confirm` | run again after creating the records; answered by key only where the strategy cannot verify |
 | `env.action` | interactive `deploy` menu | n/a, use subcommands |
 | `run.service`, `run.command` | `run` | positional |
-| `delete.confirm` | `destroy` | `--yes` |
-| `update.confirm_infra_changes` | `update` | `--yes` |
+| `delete.confirm` | `destroy` | `--answer delete.confirm=DELETE` |
+| `update.confirm_infra_changes` | `update` | `--answer update.confirm_infra_changes=true` |
 | `dockerfile.edit`, `compose.edit` | fix editors | exit 4 headless, with the path and the validate command |
-| `config.upgrade` | first save after schema upgrade (phase 1) | `--yes` |
+| `config.upgrade` | first save after schema upgrade (phase 1) | `--answer config.upgrade=true` |
 | `recipe.input.<KEY>` | `recipe add` (phase 4) | `--input KEY=VALUE` |
-| `template.reset.confirm`, `template.adopt.confirm` | `template reset`, `template adopt` (phase 2) | `--yes` |
+| `template.reset.confirm`, `template.adopt.confirm` | `template reset`, `template adopt` (phase 2) | `--answer template.reset.confirm=true`, `--answer template.adopt.confirm=true` |
 
 ### Ownership of `.opsmith/`
 

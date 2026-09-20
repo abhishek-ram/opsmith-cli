@@ -323,7 +323,7 @@ class BaseDeploymentStrategy:
                       machine_types: MachineTypeList) -> CapacityPlan: ...
 ```
 
-The plan is shown with its rationale and confirmed with `env.capacity.confirm` (or `--yes`); for monolithic, `--instance-type` overrides the machine choice. It is stored in `state.yml` as `capacity_plan` together with the workload profile it was derived from.
+The plan is shown with its rationale and confirmed with `env.capacity.confirm` (`--answer env.capacity.confirm=true` headless); for monolithic, `--instance-type` overrides the machine choice. It is stored in `state.yml` as `capacity_plan` together with the workload profile it was derived from.
 
 Monolithic implementation of `plan_capacity`:
 
@@ -357,7 +357,7 @@ A Kubernetes strategy would implement the same hook differently: a system pool w
 - env vars keep `default_value`; no `value` is invented.
 - `MonolithicDeploymentState.deployed_services` snapshots are upgraded the same way on load so change detection does not report a spurious full change.
 
-The first save after an upgrade asks `config.upgrade` (or `--yes`) and writes `.opsmith/deployments.v1.bak.yml`.
+The first save after an upgrade asks `config.upgrade` (`--answer config.upgrade=true` headless) and writes `.opsmith/deployments.v1.bak.yml`.
 
 ### Detection prompt adjustments
 

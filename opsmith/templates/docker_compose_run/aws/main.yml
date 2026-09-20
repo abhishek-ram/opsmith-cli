@@ -6,14 +6,17 @@
     # command_to_run: The command to run
     # ansible_user: the user on the remote machine
   tasks:
-    - name: Run docker compose exec
+    - name: Run docker compose run
       ansible.builtin.shell: "docker compose run --rm {{ service_name_slug }} {{ command_to_run }}"
       args:
         chdir: "/home/{{ ansible_user }}/app"
       register: command_output
       become_user: "{{ ansible_user }}"
       changed_when: false
-      failed_when: command_output.rc != 0
+      # The command's own exit status is not this playbook's failure. Opsmith exits with it, so it
+      # has to come back as a value rather than as an error. A command that could not be started
+      # at all still fails, below, because then there is no exit status to report.
+      failed_when: false
 
     - name: Print command output
       ansible.builtin.debug:
@@ -24,3 +27,25 @@
       ansible.builtin.debug:
         var: command_output.stderr_lines
       when: command_output.stderr_lines is defined and command_output.stderr_lines | length > 0
+
+    - name: Fail when the command could not be started
+      ansible.builtin.fail:
+        msg: "Could not run the command: {{ command_output.msg | default('no exit status was reported') }}"
+      when: command_output.rc is not defined
+
+    # Handed back through the marker opsmith's provisioners watch for. The two streams are base64
+    # encoded because the marker pattern stops at the first double quote, and arbitrary program
+    # output is full of them.
+    - name: Report the command exit code
+      ansible.builtin.debug:
+        msg: "OPSMITH_OUTPUT_RC={{ command_output.rc }}"
+
+    - name: Report the tail of stdout
+      ansible.builtin.debug:
+        msg: >-
+          OPSMITH_OUTPUT_STDOUT={{ (command_output.stdout_lines | default([]))[-50:] | join('\n') | b64encode }}
+
+    - name: Report the tail of stderr
+      ansible.builtin.debug:
+        msg: >-
+          OPSMITH_OUTPUT_STDERR={{ (command_output.stderr_lines | default([]))[-50:] | join('\n') | b64encode }}

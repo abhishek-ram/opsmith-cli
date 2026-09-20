@@ -133,7 +133,7 @@ Detects the account with the provider's `detect_account`, derives the bucket nam
 ### `opsmith state migrate`
 
 ```
-opsmith state migrate [--env NAME | --all] [--yes]
+opsmith state migrate [--env NAME | --all] [--answer state.migrate.confirm=true]
 ```
 
 For each Terraform directory under `.opsmith/environments/`: ensure the bucket, write `backend.tf`, run `terraform init -migrate-state -force-copy`, verify `terraform state list` is non-empty, then upload config and state files. Existing local `terraform.tfstate` files are left in place (they stay gitignored) and a note points at them.

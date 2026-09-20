@@ -99,7 +99,7 @@ After detection, before the user review step:
 
 - `opsmith analyze [--output json]` prints the inventory, a deterministic summary that involves no detection run. Replaces `repomap`.
 - `opsmith setup --skeleton` writes a `deployments.yml` with one placeholder service per detected manifest root, filled from inventory facts only, for a person or a harness agent to complete, without a detection run.
-- `opsmith setup` with an LLM runs detection with the tools; `--yes` accepts the result.
+- `opsmith setup` with an LLM runs detection with the tools; `--accept-detected` accepts the result.
 
 ### Evaluation harness
 

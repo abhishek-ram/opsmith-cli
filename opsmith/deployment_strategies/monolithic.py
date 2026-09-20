@@ -1,4 +1,5 @@
 import base64
+import binascii
 import functools
 import json
 import shutil
@@ -25,6 +26,18 @@ from opsmith.core.events import (
     STEP_SETUP,
     STEP_VM,
 )
+from opsmith.core.results import (
+    DeployedService,
+    DestroyResult,
+    DnsRecord,
+    EnvCreateResult,
+    EnvStatusResult,
+    ReleaseResult,
+    Resource,
+    ResourceKind,
+    RunResult,
+    UpdateResult,
+)
 from opsmith.deployment_strategies.base import BaseDeploymentStrategy
 from opsmith.prompts import (
     DOCKER_COMPOSE_GENERATION_PROMPT_TEMPLATE,
@@ -40,6 +53,7 @@ from opsmith.types import (
     MonolithicDeploymentState,
     ServiceInfo,
     ServiceTypeEnum,
+    VirtualMachineState,
 )
 from opsmith.utils import dns_record_is_published, slugify
 
@@ -79,6 +93,109 @@ class DockerComposeContent(BaseModel):
     )
 
 
+def _decode_stream(encoded: Optional[str]) -> str:
+    """
+    Reads back one of the streams the playbook handed over.
+
+    They arrive base64 encoded because the marker the provisioner matches stops at the first
+    double quote, and arbitrary program output is full of them. A value that does not decode is
+    returned as it arrived rather than thrown away: a tail of output is worth more than nothing,
+    and nothing here is load-bearing.
+
+    :param encoded: What the marker carried, or None when the playbook reported no such stream.
+    :return: What the command wrote, as text.
+    """
+    if not encoded:
+        return ""
+
+    try:
+        return base64.b64decode(encoded).decode("utf-8", errors="replace")
+    except (ValueError, binascii.Error):
+        return encoded
+
+
+def _reported_exit_code(outputs: Dict[str, str]) -> int:
+    """
+    Reads the exit status the playbook reported.
+
+    Zero when there is nothing to read: the playbook fails outright when it cannot run the command,
+    so reaching here without a status means the command ran and said nothing to the contrary.
+
+    :param outputs: The values the playbook handed back through its markers.
+    :return: What the command exited with.
+    """
+    try:
+        return int(outputs.get("rc", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _machine_resource(machine: VirtualMachineState, region: str) -> Resource:
+    """
+    Describes the machine an environment runs on.
+
+    Building this in one place is what keeps ``deploy``, ``status`` and ``destroy`` describing the
+    same machine the same way, rather than each naming its own subset of it.
+
+    :param machine: The machine, as the state file holds it.
+    :param region: The region the environment deploys into.
+    :return: The machine as a resource.
+    """
+    return Resource(
+        kind=ResourceKind.VIRTUAL_MACHINE,
+        id=machine.instance_id,
+        region=region,
+        address=machine.public_ip,
+        size=machine.instance_type,
+        details={
+            "cpu": str(machine.cpu),
+            "ram_gb": str(machine.ram_gb),
+            "architecture": machine.architecture.value,
+            "user": machine.user,
+            **({"private_ip": machine.private_ip} if machine.private_ip else {}),
+        },
+    )
+
+
+def _registry_resource(registry_url: str, region: str) -> Resource:
+    """
+    Describes the container registry the environment's images live in.
+
+    :param registry_url: The registry, which is both what addresses it and where it is reached.
+    :param region: The region the registry was created in.
+    :return: The registry as a resource.
+    """
+    return Resource(
+        kind=ResourceKind.CONTAINER_REGISTRY,
+        id=registry_url,
+        region=region,
+        address=registry_url,
+    )
+
+
+def _cdn_resource(cdn: FrontendCDNState, region: str) -> Resource:
+    """
+    Describes the content delivery network serving one frontend service.
+
+    :param cdn: The network, as the state file holds it.
+    :param region: The region the environment deploys into.
+    :return: The network as a resource.
+    """
+    return Resource(
+        kind=ResourceKind.CONTENT_DELIVERY_NETWORK,
+        id=cdn.cdn_distribution_id or cdn.bucket_name,
+        name=cdn.service_name_slug,
+        region=region,
+        address=cdn.cdn_domain_name or cdn.domain_name,
+        details={
+            "bucket_name": cdn.bucket_name,
+            "domain_name": cdn.domain_name,
+            **({"cdn_ip_address": cdn.cdn_ip_address} if cdn.cdn_ip_address else {}),
+            **({"certificate_id": cdn.certificate_id} if cdn.certificate_id else {}),
+        },
+    )
+
+
 def _dns_record_slug(record: Dict[str, str]) -> str:
     """
     Names one DNS record, for the key its wait is recorded under.
@@ -114,6 +231,85 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             loader=jinja2.FileSystemLoader(self.templates_dir / "docker_compose_snippets"),
             autoescape=False,
         )
+
+        # Every record this run asked somebody to create, from wherever it asked. A frontend
+        # service needs two that terraform only reports mid-run, so collecting them at the one
+        # place that waits on them is the only way the result carries all of them.
+        self.requested_dns_records: List[DnsRecord] = []
+
+    def _collect_urls(
+        self,
+        deployment_config: DeploymentConfig,
+        environment: DeploymentEnvironment,
+        env_state: MonolithicDeploymentState,
+    ) -> Dict[str, str]:
+        """
+        Works out where each routed service is reachable.
+
+        A frontend is reached at the domain its content delivery network was created for, which
+        the state file holds; a backend at the domain the environment configures for it.
+
+        :param deployment_config: What the repository deploys.
+        :param environment: The environment the services are deployed in.
+        :param env_state: The environment's state, holding the frontend deployments.
+        :return: The url of each routed service, by slug.
+        """
+        urls = {
+            cdn.service_name_slug: f"https://{cdn.domain_name}" for cdn in env_state.frontend_cdn
+        }
+        backend_services = self._get_backend_services(deployment_config)
+        for domain in environment.get_domains_for_services(backend_services):
+            urls[domain.service_name_slug] = f"https://{domain.domain_name}"
+        return urls
+
+    def _collect_resources(
+        self,
+        environment: DeploymentEnvironment,
+        env_state: MonolithicDeploymentState,
+    ) -> List[Resource]:
+        """
+        Lists everything this environment holds, in the order it was created.
+
+        A monolithic environment holds at most one machine, so this list is short; it is a list
+        anyway because that is what the result promises, and a strategy that raises several
+        machines has somewhere to report them all.
+
+        :param environment: The environment the resources belong to.
+        :param env_state: The environment's state, which is the record of what exists.
+        :return: Every resource the environment holds.
+        """
+        region = environment.cloud_provider_detail.region
+        resources = [_cdn_resource(cdn, region) for cdn in env_state.frontend_cdn]
+        if env_state.registry_url:
+            resources.append(_registry_resource(env_state.registry_url, region))
+        if env_state.virtual_machine:
+            resources.append(_machine_resource(env_state.virtual_machine, region))
+        return resources
+
+    def _collect_services(
+        self,
+        deployment_config: DeploymentConfig,
+        environment: DeploymentEnvironment,
+        env_state: MonolithicDeploymentState,
+    ) -> List[DeployedService]:
+        """
+        Lists the services the last deploy or update put on the environment.
+
+        The image each one runs is not reported: the state file records which services were
+        deployed, not which image each was deployed from, so claiming one here would be inventing
+        it. ``opsmith release`` reports the images it built, which is where that fact is true.
+
+        :param deployment_config: What the repository deploys.
+        :param environment: The environment the services run in.
+        :param env_state: The environment's state, holding the deployed-service snapshot.
+        :return: Each deployed service, with its url when it has one.
+        """
+        urls = self._collect_urls(deployment_config, environment, env_state)
+        return [
+            DeployedService(name_slug=str(service["name_slug"]), url=urls.get(service["name_slug"]))
+            for service in env_state.deployed_services or []
+            if service.get("name_slug")
+        ]
 
     def _confirm_env_vars(
         self,
@@ -270,7 +466,19 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         environment_state: MonolithicDeploymentState,
         existing_env_content: Optional[str] = None,
         initial_messages: Optional[list[ModelMessage]] = None,
-    ):
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Generates a compose stack, deploys it, and corrects it until it comes up.
+
+        :param deployment_config: What the repository deploys.
+        :param environment: The environment being deployed to.
+        :param images: The image built for each service, by slug.
+        :param environment_state: The environment's state, for the machine to deploy onto.
+        :param existing_env_content: The .env already on the machine, when there is one.
+        :param initial_messages: What a previous validation told the model, when resuming from one.
+        :return: Whether the stack came up, and what stopped it when it did not. It can return
+            False: the model may give up, and a person may be handed the file to fix.
+        """
         base_compose_template = self.docker_compose_snippets_env.get_template("base.yml")
         base_compose = base_compose_template.render(app_name=deployment_config.app_name_slug)
 
@@ -324,6 +532,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
 
         confirmed_env_content = existing_env_content or "N/A"
         is_successful = False
+        reason: Optional[str] = None
         docker_compose_content = None
         messages = initial_messages or []
         for attempt in range(settings.max_docker_compose_gen_attempts):
@@ -416,6 +625,8 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                         f" {'succeeded' if is_successful else 'failed'} with reason: {reason}."
                     ),
                 )
+
+        return is_successful, reason
 
     @staticmethod
     def _detect_configuration_changes(
@@ -778,6 +989,15 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             lines.append("----------------------------------------")
             self.events.log(STEP_DNS, "\n".join(lines), record=record)
 
+        self.requested_dns_records.extend(
+            DnsRecord(
+                type=str(record.get("type", "")),
+                name=str(record.get("name", "")),
+                value=str(record.get("value", "")),
+            )
+            for record in dns_records
+        )
+
         for record in dns_records:
             self.interact.wait_for(
                 f"dns.{_dns_record_slug(record)}",
@@ -843,7 +1063,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         self,
         deployment_config: DeploymentConfig,
         environment: DeploymentEnvironment,
-    ):
+    ) -> EnvCreateResult:
         """
         Creates a monolithic deployment environment using the provided deployment configuration and
         environment details. This function includes steps for setting up a container registry,
@@ -853,10 +1073,9 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
 
         :param deployment_config: Configuration object containing details of services, infrastructure
             dependencies, and other deployment settings.
-        :type deployment_config: DeploymentConfig
         :param environment: Deployment environment details, including region and other configurations.
-        :type environment: DeploymentEnvironment
-        :return: None
+        :return: The machine and registry that were created, where each service is now reachable,
+            and every DNS record the run asked somebody to create along the way.
         """
         frontend_services = self._get_frontend_services(deployment_config)
         other_services = self._get_backend_services(deployment_config)
@@ -900,6 +1119,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                 deployment_config, cloud_provider
             )
             instance_type = selected_machine_type.name
+
             instance_arch = selected_machine_type.architecture
             self.events.log(
                 STEP_VM,
@@ -939,15 +1159,37 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         # Save config snapshots for change detection
         self._save_deployment_state(env_state, deployment_config, env_state_path)
 
+        return EnvCreateResult(
+            environment=environment.name,
+            provider=cloud_provider.name(),
+            region=environment.cloud_provider_detail.region,
+            strategy=self.name(),
+            resources=self._collect_resources(environment, env_state),
+            registry_url=env_state.registry_url,
+            urls=self._collect_urls(deployment_config, environment, env_state),
+            dns_records=list(self.requested_dns_records),
+        )
+
     def release(
         self,
         deployment_config: DeploymentConfig,
         environment: DeploymentEnvironment,
-    ):
-        """Deploys the application."""
+    ) -> ReleaseResult:
+        """
+        Deploys the application.
+
+        :param deployment_config: What the repository deploys.
+        :param environment: The environment being released to.
+        :return: What was built and released, and whether the stack came up healthy.
+        """
         env_state_path = self._get_env_state_path(environment.name)
         env_state = MonolithicDeploymentState.load(env_state_path)
         cloud_provider = environment.cloud_provider_instance
+
+        released: List[str] = []
+        images: Dict[str, str] = {}
+        validated: Optional[bool] = None
+        validation_reason: Optional[str] = None
 
         # Nothing here writes the state file. A release deploys what the configuration already
         # describes: the build-time values it collects belong to the answer store now, and the
@@ -988,6 +1230,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                     f"Your website is available at: https://{cdn_state.domain_name}",
                     url=f"https://{cdn_state.domain_name}",
                 )
+                released.append(service.name_slug)
 
         # Release other services
         other_services = self._get_backend_services(deployment_config)
@@ -1034,7 +1277,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                 else:
                     self.events.warning(STEP_COMPOSE, f"Deployment validation failed: {reason}")
                     self.events.step(STEP_COMPOSE, "Regenerating docker-compose configuration...")
-                    self._generate_docker_compose(
+                    is_successful, reason = self._generate_docker_compose(
                         deployment_config,
                         environment,
                         images,
@@ -1042,6 +1285,12 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                         existing_env_content=confirmed_env_content,
                         initial_messages=validation_messages,
                     )
+
+                # A reason only describes a failure, so a release that came up carries none even
+                # if the last validation had something to say on the way there.
+                validated = is_successful
+                validation_reason = None if is_successful else reason
+                released.extend(service.name_slug for service in other_services)
             else:
                 # This can happen if only frontend was deployed
                 self.events.warning(
@@ -1052,14 +1301,32 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                     ),
                 )
 
+        return ReleaseResult(
+            environment=environment.name,
+            images=images,
+            services=released,
+            validated=validated,
+            validation_reason=validation_reason,
+            urls=self._collect_urls(deployment_config, environment, env_state),
+        )
+
     def destroy(
         self,
         deployment_config: DeploymentConfig,
         environment: DeploymentEnvironment,
-    ):
-        """Destroys the environment's infrastructure."""
+    ) -> DestroyResult:
+        """
+        Destroys the environment's infrastructure.
+
+        :param deployment_config: What the repository deploys.
+        :param environment: The environment being destroyed.
+        :return: What was torn down, named as it is addressed. An environment that was never
+            deployed destroys nothing and still returns a result: there was nothing to fail at.
+        """
         self.events.step(STEP_DESTROY, "Destroying monolithic environment...")
         cloud_provider = environment.cloud_provider_instance
+        region = environment.cloud_provider_detail.region
+        destroyed: List[Resource] = []
 
         env_state_path = self._get_env_state_path(environment.name)
         if not env_state_path.exists():
@@ -1070,7 +1337,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                     " infrastructure destruction."
                 ),
             )
-            return
+            return DestroyResult(environment=environment.name, destroyed=destroyed)
 
         env_state = MonolithicDeploymentState.load(env_state_path)
 
@@ -1124,6 +1391,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                 }
                 env_vars = cloud_provider.provider_detail_dump
                 tf_p1.destroy(variables_p1, env_vars=env_vars)
+                destroyed.append(_cdn_resource(cdn_state, region))
             else:
                 self.events.warning(
                     STEP_DESTROY,
@@ -1150,6 +1418,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                 }
                 env_vars = cloud_provider.provider_detail.model_dump(mode="json")
                 tf.destroy(variables, env_vars=env_vars)
+                destroyed.append(_machine_resource(env_state.virtual_machine, region))
             else:
                 self.events.warning(
                     STEP_DESTROY,
@@ -1164,6 +1433,13 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         if env_dir_path.exists():
             try:
                 shutil.rmtree(env_dir_path)
+                destroyed.append(
+                    Resource(
+                        kind=ResourceKind.WORKING_DIRECTORY,
+                        id=str(env_dir_path),
+                        name=environment.name,
+                    )
+                )
                 self.events.log(STEP_DESTROY, f"Environment directory '{env_dir_path}' deleted.")
             except OSError as e:
                 self.events.warning(
@@ -1208,6 +1484,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                 }
                 env_vars = cloud_provider.provider_detail_dump
                 tf.destroy(variables, env_vars=env_vars)
+                destroyed.append(_registry_resource(env_state.registry_url, region))
                 self.events.log(STEP_DESTROY, "Container registry destroyed successfully.")
                 try:
                     shutil.rmtree(registry_infra_path.parent)
@@ -1231,14 +1508,28 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         config_path = deployment_config.save(self.deployments_path)
         self.events.log(STEP_DESTROY, f"Deployment configuration saved to: {config_path}")
 
+        return DestroyResult(environment=environment.name, destroyed=destroyed)
+
     def run(
         self,
         deployment_config: DeploymentConfig,
         environment: DeploymentEnvironment,
         service_name_slug: str,
         command: str,
-    ):
-        """Runs a command on a specific service."""
+    ) -> RunResult:
+        """
+        Runs a command on a specific service.
+
+        The playbook no longer treats a non-zero exit as its own failure: it hands the status and
+        the two streams back through the markers the provisioner watches for, and Opsmith exits
+        with the status. A playbook that could not run the command at all still fails.
+
+        :param deployment_config: What the repository deploys.
+        :param environment: The environment the command runs in.
+        :param service_name_slug: The service to run it on.
+        :param command: The command to run.
+        :return: What the command exited with, and the tail of what it wrote.
+        """
         self.events.step(STEP_RUN, f"Running command on '{service_name_slug}': {command}")
         env_state_path = self._get_env_state_path(environment.name)
         env_state = MonolithicDeploymentState.load(env_state_path)
@@ -1268,16 +1559,30 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             **env_state.virtual_machine.model_dump(mode="json"),
             **environment.cloud_provider_instance.provider_detail_dump,
         }
-        ansible_runner.run_playbook(
+        outputs = ansible_runner.run_playbook(
             "main.yml",
             extra_vars=extra_vars,
+        )
+
+        exit_code = _reported_exit_code(outputs)
+        if exit_code != 0:
+            self.events.warning(STEP_RUN, f"The command exited with code {exit_code}.")
+
+        return RunResult(
+            environment=environment.name,
+            service=service_name_slug,
+            target=env_state.virtual_machine.public_ip,
+            command=command,
+            exit_code=exit_code,
+            stdout_tail=_decode_stream(outputs.get("stdout")),
+            stderr_tail=_decode_stream(outputs.get("stderr")),
         )
 
     def update(
         self,
         deployment_config: DeploymentConfig,
         environment: DeploymentEnvironment,
-    ):
+    ) -> UpdateResult:
         """
         Updates service configuration for an existing deployment.
 
@@ -1285,8 +1590,15 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         - Service additions/removals
         - Infrastructure dependency changes
         - Port/configuration changes
+
+        :param deployment_config: What the repository deploys.
+        :param environment: The environment being updated.
+        :return: What changed, or why nothing did. Finding no changes, being declined, or having
+            no machine to update are three ways of doing nothing, and none of them is a failure -
+            each comes back as a result saying which it was.
         """
         self.events.step(STEP_SETUP, "Starting configuration update...")
+        images: Dict[str, str] = {}
 
         # Load existing state
         env_state_path = self._get_env_state_path(environment.name)
@@ -1304,7 +1616,13 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
 
         if not has_changes:
             self.events.log(STEP_SETUP, "No configuration changes detected. Nothing to update.")
-            return
+            return UpdateResult(
+                environment=environment.name,
+                applied=False,
+                reason="No configuration changes detected.",
+                changes=changes,
+                urls=self._collect_urls(deployment_config, environment, env_state),
+            )
 
         # Display detected changes
         self.events.step(STEP_SETUP, "Configuration changes detected:", changes=changes)
@@ -1337,7 +1655,13 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             )
             if not proceed:
                 self.events.warning(STEP_SETUP, "Update cancelled by user.")
-                return
+                return UpdateResult(
+                    environment=environment.name,
+                    applied=False,
+                    reason="The infrastructure changes were not confirmed.",
+                    changes=changes,
+                    urls=self._collect_urls(deployment_config, environment, env_state),
+                )
 
         cloud_provider = environment.cloud_provider_instance
 
@@ -1399,7 +1723,13 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                         " services."
                     ),
                 )
-                return
+                return UpdateResult(
+                    environment=environment.name,
+                    applied=False,
+                    reason="No virtual machine is provisioned for this environment.",
+                    changes=changes,
+                    urls=self._collect_urls(deployment_config, environment, env_state),
+                )
 
             self.events.step(STEP_COMPOSE, "Updating backend services...")
 
@@ -1436,3 +1766,50 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
 
         # Update state with new config snapshots
         self._save_deployment_state(env_state, deployment_config, env_state_path)
+
+        return UpdateResult(
+            environment=environment.name,
+            applied=True,
+            changes=changes,
+            images=images,
+            urls=self._collect_urls(deployment_config, environment, env_state),
+        )
+
+    def status(
+        self,
+        deployment_config: DeploymentConfig,
+        environment: DeploymentEnvironment,
+    ) -> EnvStatusResult:
+        """
+        Reports what this environment is running, reading only the state file.
+
+        Nothing here reaches a cloud or a machine, which is what lets ``opsmith env status``
+        declare no external tools and answer on a host with an empty PATH. An environment with no
+        state file has never been deployed, and says so rather than failing: asking after one is a
+        reasonable thing to do.
+
+        :param deployment_config: What the repository deploys.
+        :param environment: The environment being reported on.
+        :return: What the last deploy or update left behind.
+        """
+        described = {
+            "environment": environment.name,
+            "provider": str(environment.cloud_provider.get("name", "")),
+            "region": environment.cloud_provider_detail.region,
+            "strategy": environment.strategy,
+        }
+
+        env_state_path = self._get_env_state_path(environment.name)
+        if not env_state_path.exists():
+            return EnvStatusResult(**described, deployed=False)
+
+        env_state = MonolithicDeploymentState.load(env_state_path)
+
+        return EnvStatusResult(
+            **described,
+            deployed=True,
+            resources=self._collect_resources(environment, env_state),
+            registry_url=env_state.registry_url,
+            services=self._collect_services(deployment_config, environment, env_state),
+            urls=self._collect_urls(deployment_config, environment, env_state),
+        )

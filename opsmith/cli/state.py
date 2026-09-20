@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from opsmith.cli.output import BaseRenderer, OutputFormat
+from opsmith.core.answers import AnswerSources
 from opsmith.core.context import OpsmithContext
 
 
@@ -37,8 +38,14 @@ class CliState:
     answers_file: Optional[Path] = None
     env_file: Optional[Path] = None
     accept_defaults: bool = False
-    assume_yes: bool = False
     wait_timeout: int = 600
+
+    # What those options were read into, and the two facts the interaction was built from. A
+    # subcommand's own flags are answers too, so it folds them in here and rebuilds the
+    # interaction - which it can only do if it can see what the first one was built with.
+    sources: Optional[AnswerSources] = None
+    headless: bool = False
+    resume: str = ""
 
     @property
     def src_dir(self) -> Path:

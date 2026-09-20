@@ -153,9 +153,9 @@ Resolution order for `recipe add <name>`: project-local `.opsmith/recipes/<name>
 opsmith recipe list [--output json]
 opsmith recipe show <name>                        # README + inputs + services summary
 opsmith recipe validate <path>                    # schema, references, `docker compose config` on a dry render
-opsmith recipe add <name> [--from PATH|URL] [--input K=V]... [--slug-prefix P] [--yes]
-opsmith recipe upgrade <name> [--to VERSION] [--keep-mine PATH]... [--take-theirs PATH]... [--yes]
-opsmith recipe remove <name> [--yes]
+opsmith recipe add <name> [--from PATH|URL] [--input K=V]... [--slug-prefix P] [--answer recipe.add.confirm=true]
+opsmith recipe upgrade <name> [--to VERSION] [--keep-mine PATH]... [--take-theirs PATH]... [--answer recipe.upgrade.confirm=true]
+opsmith recipe remove <name> [--answer recipe.remove.confirm=true]
 opsmith env secrets --env NAME [--reveal]          # lists secret keys, values only with --reveal
 ```
 

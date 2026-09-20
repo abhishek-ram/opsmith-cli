@@ -21,8 +21,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Protocol, Set, 
 from pydantic import BaseModel, Field
 
 from opsmith.core.answers import (
-    DESTRUCTIVE_ANSWERS,
-    SOURCE_YES,
+    DESTRUCTIVE_KEYS,
     AnswerSources,
     AnswerStore,
     environment_variable_for,
@@ -36,6 +35,43 @@ from opsmith.core.errors import (
     PendingActionError,
 )
 from opsmith.core.events import STEP_INTERACT, EventSink
+
+
+class Notice(BaseModel):
+    """One thing a run told the user through :meth:`Interaction.notify`.
+
+    It lives here rather than in ``core/results.py`` because ``notify`` is what produces it, and
+    because results imports ``opsmith.types``, which reaches ``cloud_providers`` and back to this
+    module - an import this way round closes that circle, the other way round does not.
+    """
+
+    message: str = Field(..., description="What the run said, in plain text.")
+    details: Optional[Any] = Field(
+        None, description="Machine-readable context the notice carried, when it carried any."
+    )
+
+
+def next_steps_of(details: Any) -> List[str]:
+    """
+    Reads the next steps a notice carried, however it carried them.
+
+    A caller may attach one instruction or several, so both are accepted and flattened: the result
+    envelope holds a flat list, not a list of lists.
+
+    :param details: Whatever the caller attached to the notice.
+    :return: The next steps it named, which is usually none.
+    """
+    if not isinstance(details, dict):
+        return []
+
+    declared = details.get("next_steps")
+    if declared is None:
+        return []
+    if isinstance(declared, str):
+        return [declared]
+    if isinstance(declared, (list, tuple)):
+        return [str(step) for step in declared]
+    return [str(declared)]
 
 
 class Choice(BaseModel):
@@ -64,7 +100,16 @@ class Interaction(Protocol):
     There are two implementations. :class:`~opsmith.cli.interaction.TerminalInteraction` prompts;
     :class:`HeadlessInteraction`, below, resolves an answer from what the run was told up front and
     stops the run when nothing has it.
+
+    Both collect what they were asked to :meth:`notify`, because a command's result reports it and
+    a command does not know which implementation it is talking to.
     """
+
+    #: Everything the run told the user, in the order it told them.
+    notices: List[Notice]
+
+    #: What the run asked the user or the driver to do next.
+    next_steps: List[str]
 
     def ask(
         self,
@@ -175,16 +220,26 @@ class Interaction(Protocol):
         ...
 
 
+#: Field names on :class:`~opsmith.core.events.Event`. Details are handed to the sink as keyword
+#: arguments, so a detail sharing one of these names would collide with the event's own.
+EVENT_FIELDS = {"kind", "step", "message", "data"}
+
+
 def event_data(details: Any) -> Dict:
     """
     Shapes an interaction's details into the data an event carries.
+
+    A mapping is spread across the event's data so a reader sees the fields by name, except when
+    one of them is named after a field of the event itself - a ``ConfigIssue`` has a ``message``,
+    and spreading that would pass ``message`` twice. Those are nested whole instead, which is what
+    a non-mapping gets anyway.
 
     :param details: Whatever the caller attached to the interaction.
     :return: Keyword data for the event, empty when there is nothing to attach.
     """
     if details is None:
         return {}
-    if isinstance(details, dict):
+    if isinstance(details, dict) and not EVENT_FIELDS.intersection(details):
         return details
     return {"details": details}
 
@@ -308,9 +363,9 @@ class HeadlessInteraction:
         self.sleep = sleep
         self.monotonic = monotonic
 
-        #: What the run told the user, for the result envelope a later part builds.
-        self.notices: List[Dict[str, Any]] = []
-        self.next_steps: List[Any] = []
+        #: What the run told the user, for the result envelope the command builds.
+        self.notices: List[Notice] = []
+        self.next_steps: List[str] = []
 
         #: Review editors already accepted. A second call for one means the document it accepted
         #: did not validate, and accepting it again would loop forever.
@@ -387,8 +442,8 @@ class HeadlessInteraction:
         """
         Resolves a yes or no question.
 
-        A key that gates something destructive is answered by ``--yes`` and by nothing else: its
-        default is never taken, however the run was invoked.
+        A key that gates something destructive has to be answered by name - there is no blanket
+        flag that covers it - and its default is never taken, however the run was invoked.
 
         :param key: The stable key this answer is addressed by.
         :param message: The question, in plain text.
@@ -508,10 +563,8 @@ class HeadlessInteraction:
         :param details: Machine-readable context for a harness reading the run.
         """
         self.events.log(STEP_INTERACT, message, **event_data(details))
-        self.notices.append({"message": message, "details": details})
-
-        if isinstance(details, dict) and details.get("next_steps"):
-            self.next_steps.append(details["next_steps"])
+        self.notices.append(Notice(message=message, details=details))
+        self.next_steps.extend(next_steps_of(details))
 
     def _resolve(
         self,
@@ -540,9 +593,6 @@ class HeadlessInteraction:
         :raises InvalidArgument: A supplied answer is one the question refuses.
         """
         found, raw, source = self.sources.supplied(key)
-        if not found and key in DESTRUCTIVE_ANSWERS and self.sources.assume_yes:
-            found, raw, source = True, DESTRUCTIVE_ANSWERS[key], SOURCE_YES
-
         if found:
             answer, problem = accept(raw)
             if problem:
@@ -568,7 +618,7 @@ class HeadlessInteraction:
                 key=key,
             )
 
-        takes_default = self.sources.accept_defaults and key not in DESTRUCTIVE_ANSWERS
+        takes_default = self.sources.accept_defaults and key not in DESTRUCTIVE_KEYS
         if takes_default and default is not None:
             answer, problem = accept(default)
             if problem is None:

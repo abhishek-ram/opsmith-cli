@@ -114,8 +114,14 @@ class ServiceDetector:
 
         return service_list
 
-    def generate_dockerfile(self, service: ServiceInfo):
-        """Generates Dockerfiles for each service in the deployment configuration."""
+    def generate_dockerfile(self, service: ServiceInfo) -> Optional[Path]:
+        """
+        Generates the Dockerfile for one service, when that service needs one.
+
+        :param service: The service to build an image for.
+        :return: Where the Dockerfile was written, or None for a service that needs none. The
+            caller reports what was written, and only this knows which services those are.
+        """
         buildable_service_types = [
             ServiceTypeEnum.BACKEND_API,
             ServiceTypeEnum.FULL_STACK,
@@ -126,7 +132,7 @@ class ServiceDetector:
                 STEP_BUILD,
                 f"Dockerfile not needed for service {service.service_type}, skipping.",
             )
-            return
+            return None
 
         service_dir_path = self.deployments_path / "docker" / service.name_slug
         service_dir_path.mkdir(parents=True, exist_ok=True)
@@ -148,6 +154,7 @@ class ServiceDetector:
         with open(dockerfile_path_abs, "w", encoding="utf-8") as f:
             f.write(dockerfile_content)
         self.events.log(STEP_BUILD, f"Dockerfile saved to: {dockerfile_path_abs}")
+        return dockerfile_path_abs
 
     def _generate_and_validate_dockerfile(
         self,

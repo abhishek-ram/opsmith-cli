@@ -12,10 +12,17 @@ import inquirer
 from inquirer import errors as inquirer_errors
 
 from opsmith.cli.output import BaseRenderer
-from opsmith.core.answers import DESTRUCTIVE_ANSWERS, AnswerSources, AnswerStore
+from opsmith.core.answers import AnswerSources, AnswerStore
 from opsmith.core.errors import InteractionCancelled
 from opsmith.core.events import STEP_INTERACT
-from opsmith.core.interaction import Choice, event_data, match_choice, storable
+from opsmith.core.interaction import (
+    Choice,
+    Notice,
+    event_data,
+    match_choice,
+    next_steps_of,
+    storable,
+)
 
 #: Appended to the label of the choice the model, or the code, recommends.
 RECOMMENDED_SUFFIX = " (Recommended)"
@@ -59,8 +66,9 @@ class TerminalInteraction:
         """
         :param renderer: The run's renderer. It is asked to clear anything it is animating
             before a prompt is drawn, and it is where :meth:`notify` reports.
-        :param sources: What the run was told up front. Only ``--yes`` matters on a terminal:
-            somebody who typed it has already confirmed, and should not be asked twice.
+        :param sources: What the run was told up front. Only ``--accept-detected`` matters on a
+            terminal: an answer supplied on the command line is still put to the person, because
+            they are there, but an editor they said they did not want is not opened.
         :param answers: Where an answer is remembered. A person is still asked every question -
             the store only fills in what the prompt offers, so a re-run after a stop starts from
             what was already said instead of from nothing.
@@ -68,6 +76,12 @@ class TerminalInteraction:
         self.renderer = renderer
         self.sources = sources if sources is not None else AnswerSources()
         self.answers = answers
+
+        #: What the run told the user. A person at a terminal watched it scroll past, so this is
+        #: not for them - it is for the result envelope, which reports the same thing whichever
+        #: implementation produced it.
+        self.notices: List[Notice] = []
+        self.next_steps: List[str] = []
 
     def _remembered(self, key: str) -> Any:
         """
@@ -86,15 +100,6 @@ class TerminalInteraction:
         """
         if self.answers is not None:
             self.answers.record(key, value, secret=secret)
-
-    def _answered_by_yes(self, key: str) -> Any:
-        """
-        :param key: The interaction key.
-        :return: What ``--yes`` answers for this key, or None when it answers nothing.
-        """
-        if self.sources.assume_yes and key in DESTRUCTIVE_ANSWERS:
-            return DESTRUCTIVE_ANSWERS[key]
-        return None
 
     def _prompt(self, key: str, question: Any) -> Any:
         """
@@ -139,10 +144,6 @@ class TerminalInteraction:
         :return: The answer.
         :raises InteractionCancelled: The user interrupted the prompt.
         """
-        supplied = self._answered_by_yes(key)
-        if supplied is not None:
-            return str(supplied)
-
         if default is None:
             remembered = self._remembered(key)
             default = None if remembered is None else str(remembered)
@@ -203,10 +204,6 @@ class TerminalInteraction:
         :return: What they answered.
         :raises InteractionCancelled: The user interrupted the prompt.
         """
-        supplied = self._answered_by_yes(key)
-        if supplied is not None:
-            return bool(supplied)
-
         answer = self._confirm_without_remembering(key, message, default=default)
         self._remember(key, answer)
         return answer
@@ -240,16 +237,24 @@ class TerminalInteraction:
         """
         Opens the user's editor on a document and returns what they saved.
 
+        ``--accept-detected`` skips a review editor, taking the proposal as it stands, which is
+        what makes ``opsmith setup --accept-detected`` one command rather than one editor per
+        service. A fix editor is never skipped whatever the run was told: the document it holds
+        did not validate, and accepting it unchanged would only fail again.
+
         :param key: The stable key this answer is addressed by.
         :param message: What they are being asked to review, in plain text.
         :param content: The document as it stands, which seeds the editor.
-        :param path: Where the content belongs once accepted. Unused here; part 0e names it
-            when it cannot open an editor.
-        :param on_headless: What a run with no person should do. Unused here, for the same
-            reason.
+        :param path: Where the content belongs once accepted. Unused here; the headless
+            implementation names it when it cannot open an editor.
+        :param on_headless: What a run with no person would do. Read here only to tell a review
+            editor from a fix editor, since only the first of those may be skipped.
         :return: The edited document.
         :raises InteractionCancelled: The user interrupted the prompt.
         """
+        if on_headless == "accept" and self.sources.accept_reviews:
+            return content
+
         question = inquirer.Editor(key, message=message, default=content)
         return self._prompt(key, question)
 
@@ -296,3 +301,5 @@ class TerminalInteraction:
         :param details: Machine-readable context for a harness reading the run.
         """
         self.renderer.log(STEP_INTERACT, message, **event_data(details))
+        self.notices.append(Notice(message=message, details=details))
+        self.next_steps.extend(next_steps_of(details))

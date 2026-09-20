@@ -46,8 +46,8 @@ terraform version the check parses is recorded on the context for phase 3.
 
 | Module | Holds |
 |--------|-------|
-| `cli/` | Everything that knows about a terminal: `app.py` (Typer assembly, global options, the error handler), `output.py` (renderers), `interaction.py` (`TerminalInteraction`), `state.py` (`CliState`), `commands/` (one per command, plus the `@requires` declaration in its `__init__.py`) |
-| `core/` | Orchestration that never touches a terminal: `errors.py`, `events.py`, `interaction.py`, `context.py`, `provisioners.py`, `llm.py`, `config.py` |
+| `cli/` | Everything that knows about a terminal: `app.py` (Typer assembly, global options, the error handler), `output.py` (renderers), `interaction.py` (`TerminalInteraction`), `state.py` (`CliState`), `flags.py` (the flag-to-answer table), `commands/` (one per command, plus the `@requires` declaration in its `__init__.py`) |
+| `core/` | Orchestration that never touches a terminal: `errors.py`, `events.py`, `interaction.py`, `context.py`, `provisioners.py`, `llm.py`, `config.py`, `answers.py`, `steps.py`, `results.py`, `operations.py` |
 | `cloud_providers/` | AWS and GCP, plus the registry third parties plug into |
 | `deployment_strategies/` | `base.py` holds the shared steps, `monolithic.py` composes them |
 | `infra_provisioners/` | Terraform and Ansible wrappers; the only code that shells out |
@@ -117,10 +117,34 @@ Everything else follows from that rule:
 `opsmith/cli/state.py` holds `CliState` — the terminal-only half (renderer, output mode, the
 headless flags) — and nests the `OpsmithContext` that every core call receives.
 
+- **Every operation is a function, and the menus are dispatchers.** `opsmith/core/operations.py`
+  holds one function per action, each taking the context and returning a typed result from
+  `opsmith/core/results.py`. The subcommands and the `deploy` menu both call these and nothing
+  else - **the menu never reaches a strategy or a provisioner**, which is what stops the two
+  surfaces drifting, and `opsmith/tests/test_operations.py` proves they arrive at the same
+  function with the same arguments. Every result carries `notices` and `next_steps`, collected
+  from `notify` by both interaction implementations.
+- **A result names no topology.** Infrastructure is a `List[Resource]` — `kind`, `id`, and
+  whatever of `name`, `region`, `address`, `size` and `details` applies — shared by `env create`,
+  `env status` and `destroy`, which is why none of them has a `public_ip` or a `virtual_machine`
+  field. A named scalar would be a claim that every strategy raises exactly one machine and that
+  it has an IP, which is the same over-constraint the minimal strategy contract exists to avoid;
+  `RECORDED_MACHINES` in `test_operations.py` is a two-machine strategy kept precisely so the
+  single-machine built-in cannot be the only thing the models are checked against. `ResourceKind`
+  names the kinds Opsmith knows and `kind` is a plain string so a strategy can use its own.
+- **Every flag is sugar for an answer.** `opsmith/cli/flags.py` holds `FLAG_KEYS`: `--region` is
+  `--answer env.region=`, `--domain api=host` is `--answer env.domain.api=`. A subcommand calls
+  `flags.supply(state, ...)`, which folds its options into `AnswerSources.inline` and rebuilds the
+  interaction; an explicit `--answer` still wins. `opsmith/tests/test_flag_mapping.py` checks the
+  table against the flag-shortcut column of the migration plan's key table, in both directions.
+
 ### How a deployment actually runs
 
 `setup` detects services and writes `.opsmith/deployments.yml`; `deploy` is an interactive menu over
-one environment (create / release / update / run / delete) that dispatches to a strategy.
+one environment (create / release / update / run / delete) that dispatches to a strategy. Each of
+those actions is also a subcommand - `env create`, `release`, `update`, `run`, `destroy` - over the
+same functions. The menu stays terminal-only for creation, because it asks `env.name` twice under
+one key; a headless run stopping there is told to use `opsmith env create`.
 
 `BaseDeploymentStrategy` (`opsmith/deployment_strategies/base.py`) holds the steps every strategy
 shares — container registry, image build and push, VM creation, fetching remote files, bucket
@@ -129,6 +153,16 @@ cleanup — and `MonolithicDeploymentStrategy` composes them into `deploy`/`rele
 (Ansible) → select and create a VM (LLM + Terraform) → install Docker (Ansible) → confirm DNS →
 generate and deploy the compose stack (LLM + Ansible), with the state written to
 `.opsmith/environments/<env>/state.yml`.
+
+A strategy implements six methods, all of which return a result: `deploy`, `release`, `update`,
+`run`, `destroy` and `status`. `status` reads the environment's own `state.yml` and must not
+contact a cloud - `opsmith env status` declares no external tools and is expected to answer with an
+empty `PATH`. Monolithic builds its resources through the three module helpers `_machine_resource`,
+`_registry_resource` and `_cdn_resource`, so `deploy`, `status` and `destroy` describe the same
+thing the same way rather than each naming its own subset. `run` is the one command whose result
+decides the process exit code: the playbook
+hands back the remote command's status and base64 stdout/stderr tails through `OPSMITH_OUTPUT_`
+markers, and `handle_errors` exits with it after writing the success envelope.
 
 Provisioners come from `ctx.provisioner_factory.terraform(working_dir, step=...)` /
 `.ansible(...)`, never constructed directly — that is what lets `test_monolithic_strategy.py` run a
@@ -183,10 +217,43 @@ anything structural.
 A spec is written before the work and stops changing once it ships; do not amend one to match what
 was built. Parts `0a` (CLI split and errors), `0b` (context, events, provisioner injection),
 `0c` (model configuration, tool checks, the `config` commands), `0d` (the interaction API and its
-terminal implementation) and `0e` (headless mode, the answer store, resume) have landed. `0f` adds
-the subcommands and typed results that make the menus drivable — until it does, a headless `deploy`
-cannot create a new environment, because the menu asks `env.name` twice with one key and no single
-answer satisfies both.
+terminal implementation), `0e` (headless mode, the answer store, resume) and `0f` (the headless
+subcommands and typed results) have landed. `0g` is next: cloud providers declare their questions
+as data instead of prompting inside themselves, and `env plan` reports what a run will need before
+it starts.
+
+Three deviations from the `0f` spec. The strategy contract change is **breaking** — the five action
+methods return results and `status()` is new — where the spec left the return types unstated; there
+are no known third-party strategies and `0g` breaks the provider contract in the same release, so
+0.5.0 carries one plugin note rather than two.
+
+And **there is no `--yes`**, which the spec's surface and the migration plan's global-options table
+both assumed. It was dropped rather than implemented: it is pure sugar over
+`--answer delete.confirm=DELETE`, which is precise about which gate it approves, and a flag that
+generic cannot be read at the call site — `opsmith --yes destroy --env dev` puts the approval
+nowhere near what it approves. Destructive keys are answered by name; `DESTRUCTIVE_KEYS` in
+`opsmith/core/answers.py` is what still refuses them a default and refuses to persist them. The
+review editors that `setup --yes` was meant to skip have their own flag, `setup --accept-detected`,
+carried on `AnswerSources.accept_reviews` because it answers no question. The migration plan's
+tables were updated to match, since `test_flag_mapping.py` and `test_interaction_keys.py` parse
+them, and so were the six later specs that assumed the flag — `phase-1`, `phase-2`, `phase-3`,
+`phase-4`, `phase-5` and `phase-8`. Amending those is not a breach of the rule above: a spec stops
+changing *once it ships*, and none of them has been built, so they are still designs to be built
+against rather than the record of anything. The shipped `0e` and `0f` specs keep their `--yes`,
+which is what that rule is for; this paragraph is their erratum. Three of the six named no key for
+their confirmation, so `state.migrate.confirm`, `recipe.add|upgrade|remove.confirm`,
+`data_disk.migrate.confirm` and `backup.restore.confirm` are proposals made while editing, not
+decisions — rename them freely when those phases are built.
+
+And **infrastructure is a resource list, not named fields**. The spec gives `EnvCreateResult` an
+"instance type, public IP" and has `env status` report "the VM"; both would have been a claim that
+every strategy raises exactly one machine and that it has an IP, which is false for anything
+horizontally scaled, for a cluster, and for serverless. `EnvStatusResult` was the worse of the two,
+since it typed the field as monolithic's own `VirtualMachineState`, whose seven required fields a
+third-party `status()` could neither fill nor honestly omit. They are `List[Resource]` instead,
+and `DestroyResult.destroyed` — which had been encoding `kind` and `id` into strings like
+`frontend_cdn:<slug>` — uses the same model. `RunResult` gained `target`, because a strategy with
+more than one place to run a command has to say which it picked.
 
 Three deviations from the `0e` spec, all deliberate. `ctx.steps.once(...)` yields whether the block
 should run (`with ctx.steps.once("vm.create") as should_run:`) because a context manager cannot skip

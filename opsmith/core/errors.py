@@ -55,6 +55,15 @@ class NotAGitRepository(InvalidArgument):
     """The source directory is not inside a git repository."""
 
 
+class GitNotAvailable(InvalidArgument):
+    """git is not installed, or is not on the PATH.
+
+    Distinct from :class:`NotAGitRepository` because the two are fixed differently: one wants
+    ``git init``, the other wants git installed. Opsmith reaches for git only when a command
+    actually needs the repository, so this is raised there rather than at startup.
+    """
+
+
 class UnknownEnvironment(OpsmithError):
     """The named deployment environment does not exist or has never been deployed."""
 

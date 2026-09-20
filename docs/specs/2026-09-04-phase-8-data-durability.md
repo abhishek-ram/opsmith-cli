@@ -33,7 +33,7 @@ Before `destroy`, before `update` when infra instances change, and before `recip
 
 ### Migrating an existing environment onto a data disk
 
-Environments created before this phase keep their volumes on the root disk and keep working. `opsmith data-disk migrate --env NAME [--size-gb N] [--yes]` moves them:
+Environments created before this phase keep their volumes on the root disk and keep working. `opsmith data-disk migrate --env NAME [--size-gb N] [--answer data_disk.migrate.confirm=true]` moves them:
 
 1. Snapshot the root volume through the provider SDK and record the snapshot id in `state.yml`.
 2. Create and attach the data disk through the new Terraform module, format it once, mount it at `/data`.
@@ -48,7 +48,7 @@ Backups need no migration: they read volumes and dump databases wherever the vol
 ```
 opsmith backup create  --env NAME [--label L]
 opsmith backup list    --env NAME
-opsmith backup restore --env NAME --id ID [--yes]
+opsmith backup restore --env NAME --id ID [--answer backup.restore.confirm=true]
 opsmith backup schedule --env NAME --cron "0 3 * * *" [--retain 14]
 ```
 

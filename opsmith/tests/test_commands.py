@@ -84,8 +84,8 @@ def _run_setup_capturing_the_detector(cli, runner, *extra_args: str):
     :param extra_args: Global options to pass before the command.
     :return: The patched ServiceDetector class, to read its call arguments from.
     """
-    with patch("opsmith.cli.commands.setup.ServiceDetector") as detector_class:
-        with patch("opsmith.cli.commands.setup.DeploymentConfig") as config_class:
+    with patch("opsmith.core.operations.ServiceDetector") as detector_class:
+        with patch("opsmith.core.operations.DeploymentConfig") as config_class:
             config_class.load.return_value = None
             result = runner.invoke(cli, _base_args(*extra_args, "setup"))
 
@@ -142,15 +142,16 @@ def test_repomap_returns_the_map_in_the_json_envelope(cli, runner):
 
 def test_deploy_without_a_configuration_reports_a_failure(cli, runner: CliRunner):
     """
-    Running deploy before setup aborts with typer.Exit(1) as it always has, which the handler
-    now reports as a failed envelope rather than a bare exit.
+    Running deploy before setup is a repository that has not been set up, not a crash: it is
+    INVALID_CONFIG and exit code 2, and the hint names the command that fixes it.
     """
     result = runner.invoke(cli, _base_args("--output", "json", "deploy"))
 
     envelope = json.loads([line for line in result.stdout.splitlines() if line.strip()][0])
-    assert result.exit_code == 1
+    assert result.exit_code == EXIT_CODES["INVALID_CONFIG"]
     assert envelope["ok"] is False
-    assert envelope["error"]["code"] == "INTERNAL"
+    assert envelope["error"]["code"] == "INVALID_CONFIG"
+    assert "opsmith setup" in envelope["error"]["hint"]
 
 
 def test_not_a_git_repository_exits_two(cli, runner, tmp_path: Path, monkeypatch):

@@ -218,11 +218,24 @@ class DeploymentConfig(ServiceList):
         return [env.name for env in self.environments]
 
     def get_environment(self, name: str) -> DeploymentEnvironment:
-        """Retrieves an environment by name."""
+        """
+        Retrieves an environment by name.
+
+        :param name: The environment being asked for.
+        :return: The environment.
+        :raises UnknownEnvironment: The configuration declares no environment by that name. It is
+            an OpsmithError rather than a ValueError because a name that came off a --env flag is
+            a usage error, and a driver reading the envelope needs the code and the exit status
+            that says so.
+        """
         for env in self.environments:
             if env.name == name:
                 return env
-        raise ValueError(f"Environment '{name}' not found in the deployment configuration.")
+        raise UnknownEnvironment(
+            f"Environment '{name}' not found in the deployment configuration.",
+            hint="Run 'opsmith env list' to see the environments this repository declares.",
+            details={"environment": name, "known": self.environment_names},
+        )
 
     def get_configured_env_vars(self) -> dict:
         """Retrieves a dictionary of configured environment variable with defaults."""

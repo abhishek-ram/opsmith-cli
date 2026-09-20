@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 from opsmith.core.context import OpsmithContext
 from opsmith.core.errors import InteractionCancelled
 from opsmith.core.events import Event, EventSink
+from opsmith.core.interaction import Notice, next_steps_of
 from opsmith.settings import settings
 
 
@@ -169,7 +170,11 @@ class FakeInteraction:
         """
         self.answers: Dict[str, Any] = dict(answers or {})
         self.asked: List[Dict[str, Any]] = []
-        self.notices: List[str] = []
+
+        # The same two lists both real implementations keep, because a command copies them into
+        # its result without knowing which implementation it is talking to.
+        self.notices: List[Notice] = []
+        self.next_steps: List[str] = []
 
     def _record(self, primitive: str, key: str, message: str, **fields) -> Dict[str, Any]:
         """
@@ -240,8 +245,9 @@ class FakeInteraction:
             raise InteractionCancelled(key, message)
 
     def notify(self, message, *, details=None):
-        """Keeps what the run told the user."""
-        self.notices.append(message)
+        """Keeps what the run told the user, the way the real implementations keep it."""
+        self.notices.append(Notice(message=message, details=details))
+        self.next_steps.extend(next_steps_of(details))
 
 
 class FakeGitRepo:

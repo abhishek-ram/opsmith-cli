@@ -16,11 +16,15 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import rich
 import typer
+from pydantic import BaseModel
 
 from opsmith.cli.commands import analyze
 from opsmith.cli.commands import config as config_commands
-from opsmith.cli.commands import deploy, requirements_of, setup
-from opsmith.cli.interaction import TerminalInteraction
+from opsmith.cli.commands import deploy
+from opsmith.cli.commands import env as env_commands
+from opsmith.cli.commands import release as release_commands
+from opsmith.cli.commands import requirements_of, setup
+from opsmith.cli.flags import build_interaction
 from opsmith.cli.output import (
     BaseRenderer,
     OutputFormat,
@@ -35,7 +39,7 @@ from opsmith.core.answers import AnswerSources, AnswerStore
 from opsmith.core.context import OpsmithContext
 from opsmith.core.errors import EXIT_CODES, InvalidArgument, OpsmithError
 from opsmith.core.events import EventSink
-from opsmith.core.interaction import HeadlessInteraction, Interaction
+from opsmith.core.interaction import HeadlessInteraction
 from opsmith.core.llm import configure_agent, resolve_model_config
 from opsmith.core.provisioners import ProvisionerFactory
 from opsmith.deployment_strategies import DEPLOYMENT_STRATEGY_REGISTRY
@@ -47,6 +51,7 @@ app = typer.Typer(pretty_exceptions_show_locals=False)
 config_app = typer.Typer(
     help="Inspect and validate the deployment configuration, without touching a cloud."
 )
+env_app = typer.Typer(help="Inspect and create the deployment environments of this repository.")
 
 
 #: Options whose value is a credential. They are dropped from the resume command, which is
@@ -95,37 +100,6 @@ def _is_headless(non_interactive: bool, output: OutputFormat, stdin: Any) -> boo
     :return: Whether to resolve answers instead of prompting.
     """
     return non_interactive or output is OutputFormat.JSON or not stdin.isatty()
-
-
-def _build_interaction(
-    renderer: BaseRenderer,
-    sources: AnswerSources,
-    answers: AnswerStore,
-    *,
-    headless: bool,
-    wait_timeout: int,
-    resume: str,
-) -> Interaction:
-    """
-    Builds the way this run reaches a person, or stands in for one.
-
-    :param renderer: The run's renderer, which is also its event sink.
-    :param sources: What the run was told up front.
-    :param answers: What this environment has already answered.
-    :param headless: Whether there is anybody to ask.
-    :param wait_timeout: Seconds to poll an external action before giving up.
-    :param resume: The command to run again, reported with every stop.
-    :return: The interaction to put on the context.
-    """
-    if headless:
-        return HeadlessInteraction(
-            sources,
-            answers,
-            events=renderer,
-            wait_timeout=wait_timeout,
-            resume=resume,
-        )
-    return TerminalInteraction(renderer, sources=sources, answers=answers)
 
 
 def _drain_registry_events(events: EventSink):
@@ -187,13 +161,26 @@ def _renderer_of(ctx: Optional[typer.Context]) -> BaseRenderer:
     return state.renderer if state is not None else TextRenderer()
 
 
+def _envelope_result(result: Any) -> Optional[Dict]:
+    """
+    Shapes what a command returned into the envelope's ``result`` field.
+
+    :param result: What the command body returned.
+    :return: The payload, or None when the command returned nothing to report.
+    """
+    if isinstance(result, BaseModel):
+        return result.model_dump(mode="json")
+    if isinstance(result, dict):
+        return result
+    return None
+
+
 def _report_success(ctx: Optional[typer.Context], result: Optional[Dict] = None) -> None:
     """
     Renders the success envelope for a command that returned normally.
 
     :param ctx: The Typer context of the command that completed.
     :param result: What the command returned, if it returned a payload for the envelope.
-        Part 0f gives every command a typed result; until then most return nothing.
     """
     _renderer_of(ctx).render_success(command_name(ctx), result=result)
 
@@ -348,7 +335,15 @@ def handle_errors(func: Callable) -> Callable:
         except Exception as err:
             raise _report_unexpected(ctx, err)
 
-        _report_success(ctx, result if isinstance(result, dict) else None)
+        _report_success(ctx, _envelope_result(result))
+
+        # One command ends in a code of its own: `opsmith run` exits with what the remote command
+        # exited with. It happens after the envelope, and outside the guard above, so the success
+        # it just reported is the only envelope written.
+        exit_code = getattr(result, "process_exit_code", 0)
+        if exit_code:
+            raise typer.Exit(code=exit_code)
+
         return result
 
     return wrapper
@@ -427,11 +422,6 @@ def main(
             " confirmations are excluded."
         ),
     ),
-    yes: bool = typer.Option(
-        False,
-        "--yes",
-        help="Accept destructive confirmations, such as deleting an environment.",
-    ),
     wait_timeout: int = typer.Option(
         600,
         "--wait-timeout",
@@ -469,7 +459,7 @@ def main(
         verbose=verbose,
         answers=answer_store,
     )
-    ctx.obj = CliState(
+    state = CliState(
         context=context,
         output=output,
         renderer=renderer,
@@ -482,9 +472,11 @@ def main(
         answers_file=answers,
         env_file=env_file,
         accept_defaults=accept_defaults,
-        assume_yes=yes,
         wait_timeout=wait_timeout,
+        headless=headless,
+        resume=resume,
     )
+    ctx.obj = state
 
     if output is OutputFormat.JSON:
         # The core reports through events now, but the command modules under opsmith/cli/ still
@@ -499,15 +491,15 @@ def main(
 
         _drain_registry_events(renderer)
 
-        context.interact = _build_interaction(
+        state.sources = AnswerSources.load(
+            inline=answer,
+            answers_path=answers,
+            env_path=env_file,
+            accept_defaults=accept_defaults,
+        )
+        context.interact = build_interaction(
             renderer,
-            AnswerSources.load(
-                inline=answer,
-                answers_path=answers,
-                env_path=env_file,
-                accept_defaults=accept_defaults,
-                assume_yes=yes,
-            ),
+            state.sources,
             answer_store,
             headless=headless,
             wait_timeout=wait_timeout,
@@ -524,11 +516,21 @@ def main(
         raise _report_unexpected(ctx, err)
 
 
+app.command()(handle_errors(setup.init))
 app.command()(handle_errors(setup.setup))
 app.command()(handle_errors(deploy.deploy))
 app.command()(handle_errors(analyze.repomap))
+app.command("release")(handle_errors(release_commands.release))
+app.command("update")(handle_errors(release_commands.update))
+app.command("run")(handle_errors(release_commands.run))
+app.command("destroy")(handle_errors(release_commands.destroy))
 
 config_app.command("validate")(handle_errors(config_commands.validate))
 config_app.command("schema")(handle_errors(config_commands.schema))
 config_app.command("show")(handle_errors(config_commands.show))
 app.add_typer(config_app, name="config")
+
+env_app.command("list")(handle_errors(env_commands.list_environments))
+env_app.command("create")(handle_errors(env_commands.create))
+env_app.command("status")(handle_errors(env_commands.status))
+app.add_typer(env_app, name="env")

@@ -1,6 +1,7 @@
 """Tests for the CLI contract: the error hierarchy, the exit codes and the JSON envelope."""
 
 import json
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -12,7 +13,7 @@ from opsmith.cli import app as app_module
 from opsmith.cli.app import handle_errors
 from opsmith.cli.interaction import TerminalInteraction
 from opsmith.cli.output import JsonRenderer, TextRenderer
-from opsmith.core import errors
+from opsmith.core import errors, operations
 from opsmith.core.errors import (
     EXIT_CODES,
     CloudCredentialsError,
@@ -20,6 +21,7 @@ from opsmith.core.errors import (
     LlmGaveUp,
     OpsmithError,
 )
+from opsmith.core.results import EnvironmentSummary, EnvListResult, RunResult
 from opsmith.models import MODEL_REGISTRY
 
 
@@ -115,6 +117,46 @@ def probe_app(monkeypatch, tmp_project):
         """A command that aborts with a bare typer.Exit, as the deploy menu does today."""
         raise typer.Exit(code=1)
 
+    def returns_a_typed_result(ctx: typer.Context):
+        """A command that returns a result model, as every command does from part 0f."""
+        ctx.obj.context.interact.notify(
+            "Your site is live", details={"next_steps": ["point your domain at it"]}
+        )
+        return operations.reported(
+            ctx.obj.context,
+            EnvListResult(
+                environments=[
+                    EnvironmentSummary(
+                        name="prod",
+                        provider="AWS",
+                        region="us-east-1",
+                        strategy="Monolithic",
+                        deployed=True,
+                    )
+                ]
+            ),
+        )
+
+    def exits_with_the_commands_own_code(ctx: typer.Context):
+        """A command whose result decides the exit code, as `opsmith run` does."""
+        return RunResult(
+            environment="prod", service="api", command="ls", exit_code=7, stdout_tail="out"
+        )
+
+    def stops_for_a_missing_answer(ctx: typer.Context):
+        """A command that reaches a question nothing answered."""
+        ctx.obj.context.interact.ask("env.region", "Select a region")
+
+    def stops_for_an_external_action(ctx: typer.Context):
+        """A command waiting on something only a person can do, which never happens."""
+        ctx.obj.context.interact.wait_for(
+            "dns.api",
+            "Create the A record for api.example.test",
+            check=lambda: False,
+            details={"records": [{"type": "A", "name": "api.example.test"}]},
+            timeout_s=0,
+        )
+
     probe = typer.Typer(pretty_exceptions_show_locals=False)
     probe.callback()(app_module.main)
     for command in (
@@ -126,6 +168,10 @@ def probe_app(monkeypatch, tmp_project):
         cancels_a_prompt,
         raises_value_error,
         exits_non_zero,
+        returns_a_typed_result,
+        exits_with_the_commands_own_code,
+        stops_for_a_missing_answer,
+        stops_for_an_external_action,
     ):
         probe.command()(handle_errors(command))
     return probe
@@ -298,3 +344,100 @@ def test_a_cancelled_prompt_is_reported_as_a_cancellation(runner, probe_app):
     assert envelope["ok"] is False
     assert envelope["error"]["code"] == "INTERACTION_CANCELLED"
     assert envelope["error"]["details"]["key"] == "app.name"
+
+
+def test_a_typed_result_becomes_the_envelopes_result(runner, probe_app):
+    """
+    A command returns a model, and the envelope carries it as JSON. Before part 0f the result
+    field was always an empty object, so everything a command produced reached a driver only as
+    prose inside an event message.
+    """
+    result, envelope = _invoke(runner, probe_app, "returns-a-typed-result")
+
+    assert result.exit_code == 0
+    assert envelope["ok"] is True
+    assert envelope["result"]["environments"] == [
+        {
+            "name": "prod",
+            "provider": "AWS",
+            "region": "us-east-1",
+            "strategy": "Monolithic",
+            "deployed": True,
+        }
+    ]
+
+
+def test_a_result_carries_what_the_run_told_the_user(runner, probe_app):
+    """
+    Notices and next steps are part of every result, so a driver reading only stdout still gets
+    what a terminal user would have watched go past.
+    """
+    _, envelope = _invoke(runner, probe_app, "returns-a-typed-result")
+
+    assert envelope["result"]["notices"] == [
+        {"message": "Your site is live", "details": {"next_steps": ["point your domain at it"]}}
+    ]
+    assert envelope["result"]["next_steps"] == ["point your domain at it"]
+
+
+def test_a_command_can_exit_with_a_code_of_its_own(runner, probe_app):
+    """
+    `opsmith run` exits with whatever the remote command exited with. The envelope still reports
+    success, because opsmith did what it was asked - the exit code belongs to the command.
+    """
+    result, envelope = _invoke(runner, probe_app, "exits-with-the-commands-own-code")
+
+    assert result.exit_code == 7
+    assert envelope["ok"] is True
+    assert envelope["result"]["exit_code"] == 7
+
+
+@pytest.fixture
+def invoked_as(monkeypatch):
+    """
+    Makes the process argument vector look like the invocation under test.
+
+    The resume command is built from ``sys.argv``, which under a CliRunner is pytest's own - so
+    without this a test would assert that the envelope carries the command that ran the tests.
+    """
+
+    def as_if(*argv: str):
+        monkeypatch.setattr(sys, "argv", ["opsmith", *argv])
+
+    return as_if
+
+
+def test_a_missing_answer_envelope_carries_the_command_to_run_again(runner, probe_app, invoked_as):
+    """
+    Exit 3 is half of the driver loop, and the half that makes it mechanical is the resume
+    command: everything already supplied, so only the new answer has to be added.
+    """
+    invoked_as("--api-key", "secret", "--answer", "app.name=Acme", "stops-for-a-missing-answer")
+
+    result, envelope = _invoke(runner, probe_app, "stops-for-a-missing-answer")
+
+    assert result.exit_code == EXIT_CODES["MISSING_ANSWER"]
+    assert envelope["error"]["code"] == "MISSING_ANSWER"
+    assert envelope["error"]["details"]["key"] == "env.region"
+    assert (
+        envelope["error"]["details"]["resume"]
+        == "opsmith --answer app.name=Acme stops-for-a-missing-answer"
+    )
+
+
+def test_a_pending_action_envelope_carries_the_resume_command_and_the_details(
+    runner, probe_app, invoked_as
+):
+    """
+    Exit 8 is the other half: what has to happen outside opsmith, and the command to run once it
+    has. The details carry the records, so nobody has to read the event stream to find them.
+    """
+    invoked_as("stops-for-an-external-action")
+
+    result, envelope = _invoke(runner, probe_app, "stops-for-an-external-action")
+
+    assert result.exit_code == EXIT_CODES["PENDING_ACTION"]
+    assert envelope["error"]["code"] == "PENDING_ACTION"
+    assert envelope["error"]["details"]["key"] == "dns.api"
+    assert envelope["error"]["details"]["records"] == [{"type": "A", "name": "api.example.test"}]
+    assert envelope["error"]["details"]["resume"] == "opsmith stops-for-an-external-action"
