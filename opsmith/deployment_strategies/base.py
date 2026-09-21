@@ -8,6 +8,8 @@ from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Dict, List, Optional, Type
 
+from pydantic_ai import Agent
+
 from opsmith.agent import AgentDeps
 from opsmith.cloud_providers.base import BaseCloudProvider, MachineType
 from opsmith.core.context import OpsmithContext
@@ -163,11 +165,16 @@ class BaseDeploymentStrategy(abc.ABC):
         self.interact = ctx.interact
         self.answers = ctx.answers
         self.steps = ctx.steps
-        self.agent = ctx.agent
         self.agent_deps = AgentDeps(src_dir=ctx.src_dir)
         self.src_dir = ctx.src_dir
         self.deployments_path = ctx.deployments_path
         self.templates_dir = Path(__file__).parent.parent / "templates"
+
+    @property
+    def agent(self) -> Agent[AgentDeps, str]:
+        """The configured model. Read from the context on use, so constructing a strategy does
+        not require one - see ``OpsmithContext.require_agent``."""
+        return self.ctx.require_agent()
 
     @property
     def git_repo(self):

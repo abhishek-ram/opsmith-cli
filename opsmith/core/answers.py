@@ -395,11 +395,16 @@ class AnswerStore:
             return
 
         _make_private(self.root)
-        self._environment_dir.mkdir(parents=True, exist_ok=True)
-        _write_mapping(self.answers_path, self._plain)
+        environment_dir = self._environment_dir
+        environment_dir.mkdir(parents=True, exist_ok=True)
+
+        # Built from the directory rather than read off `answers_path` and `secrets_path`: those
+        # are Optional because they answer for an unbound store, and the guard above has already
+        # settled that this one is bound.
+        _write_mapping(environment_dir / ANSWERS_FILE, self._plain)
 
         if self._cache:
-            _write_mapping(self.secrets_path, self._cache, private=True)
+            _write_mapping(environment_dir / SECRETS_FILE, self._cache, private=True)
 
 
 def _read_mapping(path: Optional[Path]) -> Dict[str, Any]:

@@ -23,6 +23,7 @@ from opsmith.core.errors import (
 )
 from opsmith.core.results import EnvironmentSummary, EnvListResult, RunResult
 from opsmith.models import MODEL_REGISTRY
+from opsmith.tests.conftest import hint_of
 
 
 def _all_error_classes():
@@ -266,7 +267,7 @@ def test_cloud_credentials_error_keeps_its_two_argument_constructor():
 
     assert error.code == "CLOUD_CREDENTIALS"
     assert error.message == "no credentials"
-    assert "https://example.test/creds" in error.hint
+    assert "https://example.test/creds" in hint_of(error)
     assert error.details == {"help_url": "https://example.test/creds"}
 
 

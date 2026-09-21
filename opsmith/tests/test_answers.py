@@ -8,6 +8,7 @@ invocation starts from everything that was already said.
 import os
 import stat
 from pathlib import Path
+from typing import Optional
 
 import pytest
 import yaml
@@ -42,12 +43,23 @@ def store(state_dir: Path, events: RecordingSink) -> AnswerStore:
     return store
 
 
-def _read(path: Path) -> dict:
+def _read(path: Optional[Path]) -> dict:
     """
-    :param path: A file the store wrote.
+    :param path: A file the store wrote. Optional only because the store's path properties
+        answer for an unbound store; every test here has bound one.
     :return: What it holds.
     """
+    assert path is not None
     return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+def _path(path: Optional[Path]) -> Path:
+    """
+    :param path: One of the store's path properties, on a store a test has bound.
+    :return: The same path, known to be there.
+    """
+    assert path is not None
+    return path
 
 
 def test_an_answer_is_on_disk_before_anything_asks_it_to_be_saved(store: AnswerStore):
@@ -69,7 +81,7 @@ def test_the_store_writes_a_file_the_answers_option_can_read_back(store: AnswerS
     store.record("env.region", "us-east-1")
     store.record("env.domain_email", "ops@example.test")
 
-    assert load_answers_file(store.answers_path) == {
+    assert load_answers_file(_path(store.answers_path)) == {
         "env.region": "us-east-1",
         "env.domain_email": "ops@example.test",
     }
@@ -86,7 +98,7 @@ def test_a_secret_is_kept_out_of_the_file_that_is_committed(store: AnswerStore):
     assert _read(store.answers_path) == {"env.region": "us-east-1"}
     assert _read(store.secrets_path) == {"envvar.DATABASE_URL": "postgres://user:pw@host/db"}
 
-    mode = stat.S_IMODE(os.stat(store.secrets_path).st_mode)
+    mode = stat.S_IMODE(os.stat(_path(store.secrets_path)).st_mode)
     assert mode == stat.S_IRUSR | stat.S_IWUSR
 
 
@@ -105,7 +117,7 @@ def test_nothing_remembered_is_written_into_the_project(tmp_path: Path, state_di
     store.record("envvar.SECRET_KEY", "hunter2", secret=True)
 
     assert list(project.rglob("*.yml")) == []
-    assert store.secrets_path.is_relative_to(state_dir)
+    assert _path(store.secrets_path).is_relative_to(state_dir)
 
 
 def test_the_state_directory_is_readable_only_by_its_owner(store: AnswerStore):
@@ -166,7 +178,7 @@ def test_what_describes_one_invocation_is_never_remembered(store: AnswerStore, k
     store.record(key, "DELETE")
 
     assert store.get(key) is None
-    assert not store.answers_path.exists() or _read(store.answers_path) in (None, {})
+    assert not _path(store.answers_path).exists() or _read(store.answers_path) in (None, {})
 
 
 def test_the_deployed_machine_wins_over_the_local_cache(store: AnswerStore):

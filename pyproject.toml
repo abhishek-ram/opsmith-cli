@@ -55,6 +55,8 @@ packages = ["opsmith"]
 
 [tool.codespell]
 skip = '*.svg'
+# The "T" suffix is the convention for a TypeVar; this one is not a misspelling of "account".
+ignore-words-list = 'accountt'
 
 [build-system]
 requires = ["hatchling"]
@@ -63,7 +65,7 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "pytest>=8.4.1",
-    "black>=25.1.0",
+    "black==26.5.1",
     "boto3-stubs==1.43.89",
     "mypy>=2.3.1",
     "types-pyyaml>=6.0.12.20260906",
@@ -85,6 +87,10 @@ disallow_untyped_defs = false
 
 [tool.black]
 line-length = 100
+# Pinned to the lowest interpreter the project supports. Left to infer from requires-python
+# (">=3.12"), black formats for the newest version it knows about and then cannot run its AST
+# safety check on a 3.12 interpreter, so the reformat goes unverified.
+target-version = ["py312"]
 
 [tool.pytest.ini_options]
 testpaths = ["opsmith/tests"]

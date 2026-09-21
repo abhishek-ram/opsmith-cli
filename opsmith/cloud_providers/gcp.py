@@ -115,7 +115,7 @@ class GCPCloudDetail(BaseCloudProviderDetail):
     zone: str = Field(..., description="The GCP zone for this environment.")
 
 
-class GCPProvider(BaseCloudProvider):
+class GCPProvider(BaseCloudProvider[GCPAccountInfo, GCPCloudDetail]):
     """GCP cloud provider implementation."""
 
     @classmethod
@@ -295,7 +295,7 @@ class GCPProvider(BaseCloudProvider):
             return GCPProvider.get_regions(
                 resolution.get("env.project_id"),
                 resolution.account.credentials,
-                resolution.events,
+                resolution.sink,
             )
 
     @staticmethod

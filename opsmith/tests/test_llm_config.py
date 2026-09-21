@@ -8,6 +8,7 @@ from opsmith.core import llm
 from opsmith.core.errors import InvalidArgument
 from opsmith.core.llm import MODEL_ENV_VAR, configure_agent, resolve_model_config
 from opsmith.models import MODEL_REGISTRY
+from opsmith.tests.conftest import hint_of
 
 FIRST_MODEL = MODEL_REGISTRY.model_names[0]
 SECOND_MODEL = MODEL_REGISTRY.model_names[1]
@@ -77,8 +78,8 @@ def test_no_model_anywhere_is_an_invalid_argument():
 
     error = raised.value
     assert error.code == "INVALID_ARGUMENT"
-    assert MODEL_ENV_VAR in error.hint
-    assert all(name in error.hint for name in MODEL_REGISTRY.model_names)
+    assert MODEL_ENV_VAR in hint_of(error)
+    assert all(name in hint_of(error) for name in MODEL_REGISTRY.model_names)
     assert error.details["models"] == MODEL_REGISTRY.model_names
 
 
@@ -90,7 +91,7 @@ def test_an_unknown_model_is_an_invalid_argument():
     error = raised.value
     assert error.code == "INVALID_ARGUMENT"
     assert "nope:nope" in error.message
-    assert all(name in error.hint for name in MODEL_REGISTRY.model_names)
+    assert all(name in hint_of(error) for name in MODEL_REGISTRY.model_names)
     assert error.details["model"] == "nope:nope"
 
 
@@ -120,7 +121,7 @@ def test_no_key_anywhere_names_the_variable_in_the_hint():
 
     error = raised.value
     assert error.code == "INVALID_ARGUMENT"
-    assert _key_variable(FIRST_MODEL) in error.hint
+    assert _key_variable(FIRST_MODEL) in hint_of(error)
     assert error.details["env_var"] == _key_variable(FIRST_MODEL)
 
 
@@ -132,7 +133,7 @@ def test_a_key_in_the_settings_file_is_refused(monkeypatch):
         resolve_model_config(FIRST_MODEL, None)
 
     assert ".opsmith.conf.yml" in raised.value.message
-    assert _key_variable(FIRST_MODEL) in raised.value.hint
+    assert _key_variable(FIRST_MODEL) in hint_of(raised.value)
 
 
 def test_configuring_the_agent_exports_the_key(monkeypatch):

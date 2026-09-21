@@ -12,7 +12,7 @@ import stat
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Union
+from typing import Any, Dict, Iterator, Mapping, Optional
 
 from opsmith.core.errors import AnsibleFailed
 from opsmith.core.events import EventSink
@@ -47,7 +47,7 @@ class AnsibleProvisioner(BaseInfrastructureProvisioner):
     def run_playbook(
         self,
         playbook_name: str,
-        extra_vars: Dict[str, Union[str, List[str]]],
+        extra_vars: Mapping[str, Any],
         inventory: Optional[str] = None,
         user: Optional[str] = None,
     ) -> Dict[str, str]:
@@ -86,7 +86,7 @@ class AnsibleProvisioner(BaseInfrastructureProvisioner):
 
 
 @contextmanager
-def _extra_vars_file(extra_vars: Dict[str, Union[str, List[str]]]) -> Iterator[Optional[Path]]:
+def _extra_vars_file(extra_vars: Mapping[str, Any]) -> Iterator[Optional[Path]]:
     """
     Writes the extra variables somewhere only this user can read, for the length of the run.
 

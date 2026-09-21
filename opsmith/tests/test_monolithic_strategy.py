@@ -9,7 +9,7 @@ or a subprocess here, so what it *would* have applied is what the tests assert o
 import base64
 import json
 from pathlib import Path
-from typing import Literal, Type
+from typing import Any, Dict, Literal, Type
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -280,7 +280,7 @@ def ctx(
 def strategy(ctx: OpsmithContext) -> MonolithicDeploymentStrategy:
     """The strategy under test, with the SSH key lookup stubbed out."""
     strategy = MonolithicDeploymentStrategy(ctx)
-    strategy._get_ssh_public_key = lambda: "ssh-ed25519 AAAAfake test@opsmith"
+    setattr(strategy, "_get_ssh_public_key", lambda: "ssh-ed25519 AAAAfake test@opsmith")
     return strategy
 
 
@@ -703,7 +703,7 @@ def _headless_strategy(context: OpsmithContext) -> MonolithicDeploymentStrategy:
     :return: The strategy, with the SSH key lookup stubbed out as elsewhere.
     """
     strategy = MonolithicDeploymentStrategy(context)
-    strategy._get_ssh_public_key = lambda: "ssh-ed25519 AAAAfake test@opsmith"
+    setattr(strategy, "_get_ssh_public_key", lambda: "ssh-ed25519 AAAAfake test@opsmith")
     return strategy
 
 
@@ -1181,7 +1181,7 @@ def _write_state_file(ctx, with_machine: bool = True):
     :param ctx: The context whose deployments directory the file belongs in.
     :param with_machine: Whether the environment has a machine to run commands on.
     """
-    state = {"registry_url": REGISTRY_URL}
+    state: Dict[str, Any] = {"registry_url": REGISTRY_URL}
     if with_machine:
         state["virtual_machine"] = {
             "cpu": 2,

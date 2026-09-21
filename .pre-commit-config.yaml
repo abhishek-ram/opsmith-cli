@@ -5,7 +5,7 @@ repos:
       - id: isort
         args: ["--profile", "black"]
   - repo: https://github.com/psf/black
-    rev: 23.3.0
+    rev: 26.5.1
     hooks:
       - id: black
         args: ["--line-length", "100", "--preview"]
@@ -20,3 +20,13 @@ repos:
       - id: codespell
         additional_dependencies:
           - tomli
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        # Run through uv rather than mirrors-mypy: the pydantic plugin has to import the same
+        # pydantic the project pins, which an isolated hook environment would not have.
+        entry: uv run mypy
+        language: system
+        types: [python]
+        pass_filenames: false

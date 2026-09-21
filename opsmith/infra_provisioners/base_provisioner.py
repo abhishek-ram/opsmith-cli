@@ -122,6 +122,9 @@ class BaseInfrastructureProvisioner:
                 details={"executable": self.executable},
             )
 
+        # Popen types stdout as Optional because it is None without a pipe; this call always
+        # asks for one, so the stream is there.
+        assert process.stdout is not None
         for line in iter(process.stdout.readline, ""):
             stripped_line = line.strip()
             full_output.append(stripped_line)

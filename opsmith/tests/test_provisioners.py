@@ -16,6 +16,7 @@ import pytest
 from opsmith.core.errors import EXIT_CODES, AnsibleFailed, TerraformFailed
 from opsmith.core.provisioners import PACKAGE_TEMPLATES_DIR, ProvisionerFactory
 from opsmith.infra_provisioners.ansible_provisioner import AnsibleProvisioner
+from opsmith.tests.conftest import hint_of
 
 
 @pytest.fixture
@@ -146,7 +147,7 @@ def test_a_missing_executable_is_reported_with_the_tool_to_install(factory, tmp_
         provisioner._run_command(["terraform-that-does-not-exist", "apply"])
 
     assert raised.value.details["executable"] == "terraform"
-    assert "PATH" in raised.value.hint
+    assert "PATH" in hint_of(raised.value)
 
 
 def test_terraform_outputs_are_read_back_as_values(factory, tmp_path: Path):

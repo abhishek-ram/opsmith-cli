@@ -1,7 +1,7 @@
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Type
+from typing import List, Optional, Set
 
 from pydantic_ai import Agent, AgentCapability, ModelRetry, RunContext
 from pydantic_ai.capabilities import Instrumentation
@@ -19,10 +19,13 @@ class AgentDeps:
 
 def is_duplicate_tool_call(ctx: RunContext[AgentDeps], tool_name: str) -> bool:
     """"""
-    tool_calls = set()
+    # A tool call may carry no arguments at all, which is why None is a member here rather than
+    # something to skip: two argument-less calls to the same tool are still a repeat.
+    tool_calls: Set[Optional[str]] = set()
     message_parts = [item for message in ctx.messages for item in message.parts]
     for part in message_parts:
         if part.part_kind == "tool-call" and part.tool_name == tool_name:
+            tool_args: Optional[str]
             if isinstance(part.args, dict):
                 tool_args = json.dumps(part.args, sort_keys=True)
             else:
@@ -36,11 +39,11 @@ def is_duplicate_tool_call(ctx: RunContext[AgentDeps], tool_name: str) -> bool:
     return False
 
 
-def build_agent(model_config: Type[BaseAiModel], instrument: bool = False) -> Agent:
+def build_agent(model_config: BaseAiModel, instrument: bool = False) -> Agent[AgentDeps, str]:
     """
     Builds the pydantic-ai agent every model call in a run goes through.
 
-    :param model_config: The model class the run resolved to.
+    :param model_config: The model the run resolved to.
     :param instrument: Whether to emit OpenTelemetry spans for the run, which is what a
         configured logfire token turns on.
     :return: The agent, with the repo-reading and secret-generating tools registered.

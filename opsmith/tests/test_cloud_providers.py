@@ -109,8 +109,10 @@ def test_aws_declares_the_region_and_lists_it_from_the_account():
     assert questions[0].primitive == "select"
     assert questions[0].asked_by == "AWS"
 
+    region_choices = questions[0].choices
+    assert region_choices is not None
     with patch.object(AWSProvider, "get_regions", return_value=AWS_REGIONS):
-        assert questions[0].choices(Resolution()) == AWS_REGIONS
+        assert region_choices(Resolution()) == AWS_REGIONS
 
 
 def test_aws_builds_its_detail_from_an_answers_mapping(ctx):
@@ -203,6 +205,7 @@ def test_the_gcp_zone_loader_recommends_the_first_zone():
     with patch.object(GCPProvider, "get_zones", return_value=GCP_ZONES):
         choices = GCPProvider.zone_choices(resolution)
 
+    assert choices is not None
     assert [choice.value for choice in choices] == GCP_ZONES
     assert [choice.recommended for choice in choices] == [True, False]
 

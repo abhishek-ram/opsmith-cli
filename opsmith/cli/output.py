@@ -8,7 +8,7 @@ import abc
 import json
 import sys
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Protocol
 
 import typer
 from rich.console import Console
@@ -101,6 +101,19 @@ def build_logo() -> Text:
         style="bold cyan",
     )
     return ascii_art_logo
+
+
+class Renderer(Protocol):
+    """What :class:`~opsmith.cli.interaction.TerminalInteraction` asks of a renderer.
+
+    Two things: somewhere to report a notice, which every sink has, and a way to clear whatever
+    is being animated before a prompt is drawn over it. :class:`BaseRenderer` satisfies this,
+    and so does a recording double.
+    """
+
+    def log(self, step: str, message: str, **fields: Any): ...
+
+    def stop_waiting(self): ...
 
 
 class BaseRenderer(EventSink):

@@ -13,9 +13,10 @@ Nothing here knows about a terminal. Questions go through ``ctx.interact``, prog
 ``ctx.events``, and what a run stopped for is the caller's problem, not this module's.
 """
 
+import inspect
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, List, Optional, Tuple, Type
+from typing import Any, List, Optional, Tuple, Type, TypeVar
 
 import yaml
 
@@ -172,12 +173,18 @@ def strategy_for(ctx: OpsmithContext, environment: DeploymentEnvironment) -> Bas
     return DEPLOYMENT_STRATEGY_REGISTRY.get_strategy_class(environment.strategy)(ctx)
 
 
-def reported(ctx: OpsmithContext, result: OperationResult) -> OperationResult:
+ResultT = TypeVar("ResultT", bound=OperationResult)
+
+
+def reported(ctx: OpsmithContext, result: ResultT) -> ResultT:
     """
     Attaches what the run told the user to the result it is about to return.
 
     A terminal user read the notices as they went past; a driver reads them here. Both
     implementations of the interaction collect them, so this does not care which one ran.
+
+    The result type is carried through, so a caller returning ``reported(ctx, ReleaseResult(...))``
+    still returns a ``ReleaseResult`` rather than the base class.
 
     :param ctx: The run's context.
     :param result: The result being returned.
@@ -725,7 +732,12 @@ def declares_questions(implementation: type, base: type) -> bool:
     :param base: The class whose ``questions`` is the do-nothing default.
     :return: Whether the implementation declares its own questions.
     """
-    return implementation.questions.__func__ is not base.questions.__func__
+    # getattr_static looks the attribute up through the MRO without running the descriptor
+    # protocol, so this compares the two underlying classmethod objects rather than the freshly
+    # bound methods that plain attribute access would hand back.
+    return inspect.getattr_static(implementation, "questions") is not inspect.getattr_static(
+        base, "questions"
+    )
 
 
 def plan_environment(

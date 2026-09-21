@@ -37,7 +37,7 @@ from pydantic import BaseModel, Field
 
 from opsmith.core.answers import DESTRUCTIVE_KEYS, environment_variable_for
 from opsmith.core.errors import OpsmithError
-from opsmith.core.events import EventSink
+from opsmith.core.events import EventSink, NullSink
 from opsmith.core.interaction import Choice, Interaction, choice_token
 
 if TYPE_CHECKING:
@@ -83,6 +83,19 @@ class Resolution:
     #: ones the run it is planning would never be stopped by. Returns whether there is an answer
     #: and what it is.
     lookup: Optional[Callable[[str], Tuple[bool, Any]]] = None
+
+    @property
+    def sink(self) -> EventSink:
+        """
+        Where a loader reports its wait, whether or not the walk was given a sink.
+
+        ``events`` is optional because a bare ``Resolution`` is a useful thing to build in a test
+        and in ``evaluate``, so this falls back to a sink that discards rather than making every
+        loader check.
+
+        :return: The sink to report into.
+        """
+        return self.events if self.events is not None else NullSink()
 
     def knows(self, key: str) -> bool:
         """

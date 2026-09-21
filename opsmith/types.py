@@ -11,7 +11,7 @@ from opsmith.cloud_providers.base import (
     BaseCloudProviderDetail,
     CpuArchitectureEnum,
 )
-from opsmith.core.errors import UnknownEnvironment
+from opsmith.core.errors import InvalidConfig, UnknownEnvironment
 from opsmith.settings import settings
 
 
@@ -194,8 +194,24 @@ class DeploymentEnvironment(BaseModel):
 
     @property
     def cloud_provider_instance(self) -> BaseCloudProvider:
-        """Retrieves a cloud provider instance for the environment."""
-        provider_cls = CLOUD_PROVIDER_REGISTRY.get_provider_class(self.cloud_provider.get("name"))
+        """
+        Retrieves a cloud provider instance for the environment.
+
+        :return: The provider named in the environment's cloud provider detail.
+        :raises InvalidConfig: The detail names no provider.
+        :raises InvalidArgument: The named provider is not in the registry.
+        """
+        # `cloud_provider` is an unschema'd dict, so a hand-edited file can reach here without a
+        # name. Saying that is the problem beats asking the registry for a provider called None.
+        provider_name = self.cloud_provider.get("name")
+        if not provider_name:
+            raise InvalidConfig(
+                f"Environment '{self.name}' does not name a cloud provider.",
+                hint="Add a 'name' under the environment's 'cloud_provider' in deployments.yml.",
+                details={"environment": self.name},
+            )
+
+        provider_cls = CLOUD_PROVIDER_REGISTRY.get_provider_class(provider_name)
         return provider_cls(self.cloud_provider)
 
     @property
@@ -351,6 +367,42 @@ class MonolithicDeploymentState(BaseModel):
     deployed_infra_deps: Optional[List[dict]] = Field(
         default_factory=list, description="Snapshot of infrastructure dependencies deployed."
     )
+
+    def require_virtual_machine(self) -> "VirtualMachineState":
+        """
+        The machine this environment runs on, for a step that cannot proceed without it.
+
+        The field is optional because a state file is written as the deploy goes: the machine is
+        recorded once Terraform has raised it. A step that deploys onto the machine, or reads its
+        architecture, runs strictly after that - so finding nothing here means the environment
+        was never deployed all the way through, which is what ``UnknownEnvironment`` says.
+
+        :return: The recorded machine.
+        :raises UnknownEnvironment: The environment has no machine recorded.
+        """
+        if self.virtual_machine is None:
+            raise UnknownEnvironment(
+                "This environment has no virtual machine recorded.",
+                hint="Run 'opsmith deploy' for this environment to finish creating it.",
+            )
+        return self.virtual_machine
+
+    def require_registry_url(self) -> str:
+        """
+        The container registry images are pushed to, for a step that cannot proceed without it.
+
+        Optional for the same reason as :meth:`require_virtual_machine`: it is recorded once the
+        registry step has run, and everything that pushes an image runs after that.
+
+        :return: The recorded registry URL.
+        :raises UnknownEnvironment: The environment has no registry recorded.
+        """
+        if self.registry_url is None:
+            raise UnknownEnvironment(
+                "This environment has no container registry recorded.",
+                hint="Run 'opsmith deploy' for this environment to finish creating it.",
+            )
+        return self.registry_url
 
     @classmethod
     def load(cls: Type["MonolithicDeploymentState"], path: Path) -> "MonolithicDeploymentState":

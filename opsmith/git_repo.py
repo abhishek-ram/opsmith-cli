@@ -3,7 +3,7 @@ import tarfile
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, List, Optional
+from typing import Any, ContextManager, Iterator, List, Optional, Protocol
 
 from opsmith.core.errors import GitNotAvailable, NotAGitRepository
 from opsmith.core.events import STEP_BUILD, STEP_SETUP, EventSink, resolve_sink
@@ -32,6 +32,21 @@ def _import_git() -> Any:
         ) from err
 
     return git
+
+
+class Repository(Protocol):
+    """What a run actually asks of the repository it is deploying.
+
+    Named as a protocol rather than the concrete class for the same reason the provisioners are:
+    a context may be handed something that is not a checkout on disk - a double in the test
+    suite today - and :class:`GitRepo` satisfies this without declaring that it does.
+    """
+
+    def get_git_tracked_files(self, src_dirs: List[str]) -> List[Path]: ...
+
+    def git_archive_context(self) -> ContextManager[Path]: ...
+
+    def ensure_gitignore(self): ...
 
 
 class GitRepo:

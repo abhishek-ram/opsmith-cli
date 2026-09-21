@@ -14,7 +14,7 @@ uv run pytest                            # whole suite (what CI runs, on 3.12 an
 uv run pytest opsmith/tests/test_monolithic_strategy.py::test_deploy_runs_the_provisioners_in_order
 uv run pytest -k "provisioner"           # by name
 
-pre-commit run --all-files               # isort, black --preview -l 100, flake8, codespell
+pre-commit run --all-files               # isort, black --preview -l 100, flake8, codespell, mypy
 
 uv run opsmith --model anthropic:claude-sonnet-4-6 --api-key "$KEY" setup
 uv run opsmith --model ... --api-key ... --output json repomap   # machine-readable mode
@@ -23,8 +23,19 @@ OPSMITH_MODEL=anthropic:claude-sonnet-4-6 ANTHROPIC_API_KEY="$KEY" \
   uv run opsmith --output json config validate    # no flags, no docker, no terraform
 ```
 
-Format through `pre-commit`, not a locally installed `black`: the hook pins 23.3.0, and a newer
-black disagrees with it about wrapping implicitly concatenated strings, so the two will fight.
+Format through `pre-commit`, not a locally installed `black`. The hook and the `dev` group both
+pin **26.5.1**, so the two agree; a locally installed black of another version will fight them.
+`target-version = ["py312"]` is set deliberately - left to infer from `requires-python` (">=3.12")
+black formats for the newest Python it knows and then cannot run its AST safety check on a 3.12
+interpreter, so the reformat goes unverified. `.flake8` ignores `E704` because black 24+ collapses
+a stub body to `def f(): ...` on one line, which is what that rule objects to.
+
+`mypy` runs in `pre-commit` too, as a `local`/`system` hook calling `uv run mypy` rather than
+`mirrors-mypy`: the pydantic plugin has to import the same pydantic the project pins, which an
+isolated hook environment would not have. It is clean across the package and the tests, and
+`opsmith/core/provisioners.py`, `opsmith/git_repo.py` and `opsmith/cli/output.py` each hold a
+`Protocol` naming what a run actually asks of a provisioner, a repository and a renderer - which
+is what lets the fakes in `conftest.py` stand in without inheriting from anything.
 
 A model is always required, but neither option has to be typed: `opsmith/core/llm.py` resolves the
 model from `--model`, then `OPSMITH_MODEL`, then `model:` in `.opsmith.conf.yml`, and the key from

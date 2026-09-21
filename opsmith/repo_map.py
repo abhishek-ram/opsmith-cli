@@ -2,7 +2,7 @@ import os
 from collections import defaultdict
 from importlib import resources
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Set, Tuple
+from typing import Callable, Dict, List, NamedTuple, Optional, Set, Tuple, Union
 
 from grep_ast import TreeContext, filename_to_lang
 from grep_ast.tsl import get_language, get_parser
@@ -50,7 +50,7 @@ def get_scm_filename(lang: str) -> Optional[Path]:
             "queries", "tree-sitter-languages", f"{lang}-tags.scm"
         )
         if path.is_file():
-            return path
+            return Path(str(path))
     except KeyError:
         pass  # Silently continue if path doesn't exist or package structure is not as expected
 
@@ -100,7 +100,7 @@ class RepoMap:
         self.max_tags_depth = max_tags_depth
         self.repo_content_prefix = repo_content_prefix if repo_content_prefix is not None else ""
 
-        self._warned_missing_scm = set()
+        self._warned_missing_scm: Set[str] = set()
         if self.verbose:
             self.events.log(STEP_DETECT, f"RepoMap initialized for {self.src_dir}")
 
@@ -231,7 +231,7 @@ class RepoMap:
         return list(self._get_tags_raw(filename_abs_str, rel_filename_str))
 
     def _get_tags_raw(self, filename_abs_str: str, rel_filename_str: str) -> List[Tag]:
-        tags = []
+        tags: List[Tag] = []
         lang = filename_to_lang(filename_abs_str)
         if not lang:
             return tags
@@ -293,7 +293,7 @@ class RepoMap:
                 continue
 
             saw_kinds.add(kind)
-            node_text = node.text.decode("utf-8", "ignore")
+            node_text = node.text.decode("utf-8", "ignore") if node.text else ""
             line_no = node.start_point[0]
 
             tag_tuple = (rel_filename_str, filename_abs_str, line_no, node_text, kind)
@@ -306,7 +306,7 @@ class RepoMap:
     def _get_all_tags(
         self,
         all_filenames_abs: List[str],  # All git-tracked files, absolute paths
-        progress_callback: Optional[callable] = None,
+        progress_callback: Optional[Callable[[str], None]] = None,
     ) -> List[Tag | Tuple[str]]:
         """ """
         all_tags: List[Tag | Tuple[str]] = []
@@ -362,7 +362,7 @@ class RepoMap:
         self,
         all_filenames_abs: List[str],  # All git-tracked files
         max_tokens: int,
-        progress_callback: Optional[callable] = None,
+        progress_callback: Optional[Callable[[str], None]] = None,
     ) -> Optional[str]:
         if progress_callback:
             progress_callback(f"{REPO_MAP_MESSAGE}: Ranking tags and files...")
@@ -402,7 +402,8 @@ class RepoMap:
         # An item can be Tag or Tuple[str]. Need a consistent way to check uniqueness.
         # Uniqueness check: For Tags, by (rel_filename, name, line, kind). For Tuples,
         # by (rel_filename,).
-        seen_items_repr = set()
+        seen_items_repr: Set[Union[Tuple[str, str, str], Tuple[str, str]]] = set()
+        repr_key: Union[Tuple[str, str, str], Tuple[str, str]]
         deduplicated_final_item_list = []
         for item in final_item_list:
             if isinstance(item, Tag):

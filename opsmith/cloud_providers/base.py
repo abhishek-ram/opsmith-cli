@@ -1,7 +1,17 @@
 import abc
 from enum import Enum
 from importlib.metadata import entry_points
-from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Type
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    Generic,
+    List,
+    Mapping,
+    Optional,
+    Type,
+    TypeVar,
+)
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
@@ -140,7 +150,8 @@ class CloudProviderRegistry:
         from opsmith.cloud_providers.aws import AWSProvider
         from opsmith.cloud_providers.gcp import GCPProvider
 
-        for provider_cls in [AWSProvider, GCPProvider]:
+        builtin_providers: List[Type[BaseCloudProvider[Any, Any]]] = [AWSProvider, GCPProvider]
+        for provider_cls in builtin_providers:
             self.register(provider_cls)
 
     def _load_plugin_providers(self):
@@ -162,7 +173,26 @@ class CloudProviderRegistry:
                 )
 
 
-class BaseCloudProvider(abc.ABC):
+AccountT = TypeVar("AccountT", bound=AccountInfo)
+"""What a provider's :meth:`BaseCloudProvider.detect_account` found.
+
+Each provider detects its own shape and builds its detail from that same shape, so the two are
+one choice rather than two. Parameterising the base on it is what lets a provider narrow both
+signatures at once without violating the substitution rule. A provider that subclasses the base
+bare is still valid - it is simply read as ``BaseCloudProvider[AccountInfo]``.
+"""
+
+
+DetailT = TypeVar("DetailT", bound=BaseCloudProviderDetail)
+"""What this provider records in ``deployments.yml``.
+
+Paired with :data:`AccountT` for the same reason: ``get_detail_model`` and ``provider_detail``
+are the same choice named twice, and parameterising on it is what lets a provider read its own
+fields - a GCP project id, an AWS session-manager plugin - without a cast at every use.
+"""
+
+
+class BaseCloudProvider(abc.ABC, Generic[AccountT, DetailT]):
     """Abstract base class for cloud providers."""
 
     @classmethod
@@ -179,13 +209,13 @@ class BaseCloudProvider(abc.ABC):
 
     @classmethod
     @abc.abstractmethod
-    def get_detail_model(cls) -> Type["BaseCloudProviderDetail"]:
+    def get_detail_model(cls) -> Type[DetailT]:
         """The cloud provider detail model."""
         raise NotImplementedError
 
     @classmethod
     @abc.abstractmethod
-    def detect_account(cls, ctx: "OpsmithContext") -> "AccountInfo":
+    def detect_account(cls, ctx: "OpsmithContext") -> AccountT:
         """
         Finds out what it can about the account, without asking anybody anything.
 
@@ -217,7 +247,7 @@ class BaseCloudProvider(abc.ABC):
     @classmethod
     @abc.abstractmethod
     def build_detail(
-        cls, ctx: "OpsmithContext", account: "AccountInfo", answers: Mapping[str, Any]
+        cls, ctx: "OpsmithContext", account: AccountT, answers: Mapping[str, Any]
     ) -> "BaseCloudProviderDetail":
         """
         Assembles what the environment records about this provider.
@@ -242,5 +272,7 @@ class BaseCloudProvider(abc.ABC):
         Initializes the cloud provider.
         Subclasses should implement specific authentication and setup.
         """
-        self.provider_detail = TypeAdapter(self.get_detail_model()).validate_python(provider_detail)
+        self.provider_detail: DetailT = TypeAdapter(self.get_detail_model()).validate_python(
+            provider_detail
+        )
         self.provider_detail_dump = self.provider_detail.model_dump(mode="json", exclude={"name"})

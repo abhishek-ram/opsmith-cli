@@ -26,7 +26,7 @@ from opsmith.core.errors import (
     PendingActionError,
 )
 from opsmith.core.interaction import Choice, HeadlessInteraction
-from opsmith.tests.conftest import RecordingSink
+from opsmith.tests.conftest import RecordingSink, hint_of
 
 
 class FakeRenderer(RecordingSink):
@@ -402,7 +402,9 @@ def test_a_secret_answer_is_remembered_apart(headless, store: AnswerStore):
     interact.ask("envvar.DATABASE_URL", "Enter value for DATABASE_URL", secret=True)
 
     assert store.get("envvar.DATABASE_URL") == "postgres://host/db"
-    assert yaml.safe_load(store.answers_path.read_text(encoding="utf-8")) in (None, {})
+    answers_path = store.answers_path
+    assert answers_path is not None
+    assert yaml.safe_load(answers_path.read_text(encoding="utf-8")) in (None, {})
 
 
 def test_a_question_nobody_answered_stops_the_run(headless):
@@ -429,8 +431,8 @@ def test_a_missing_secret_is_not_asked_for_on_a_command_line(headless):
     with pytest.raises(MissingAnswerError) as raised:
         headless().ask("envvar.SECRET_KEY", "Enter value for SECRET_KEY", secret=True)
 
-    assert "--answer" not in raised.value.hint
-    assert "OPSMITH_ANSWER_ENVVAR_SECRET_KEY" in raised.value.hint
+    assert "--answer" not in hint_of(raised.value)
+    assert "OPSMITH_ANSWER_ENVVAR_SECRET_KEY" in hint_of(raised.value)
     assert raised.value.details["secret"] is True
 
 

@@ -13,7 +13,7 @@ from typing import Optional
 
 from pydantic_ai import Agent
 
-from opsmith.agent import build_agent
+from opsmith.agent import AgentDeps, build_agent
 from opsmith.core.errors import InvalidArgument
 from opsmith.models import MODEL_REGISTRY, BaseAiModel
 from opsmith.settings import settings
@@ -136,7 +136,7 @@ def resolve_model_config(model: Optional[str], api_key: Optional[str]) -> ModelC
     )
 
 
-def configure_agent(config: ModelConfig, instrument: bool = False) -> Agent:
+def configure_agent(config: ModelConfig, instrument: bool = False) -> Agent[AgentDeps, str]:
     """
     Exports the API key and builds the agent for the run.
 

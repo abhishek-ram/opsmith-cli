@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional
 import inquirer
 from inquirer import errors as inquirer_errors
 
-from opsmith.cli.output import BaseRenderer
+from opsmith.cli.output import Renderer
 from opsmith.core.answers import AnswerSources, AnswerStore
 from opsmith.core.errors import InteractionCancelled
 from opsmith.core.events import STEP_INTERACT
@@ -58,7 +58,7 @@ class TerminalInteraction:
 
     def __init__(
         self,
-        renderer: BaseRenderer,
+        renderer: Renderer,
         *,
         sources: Optional[AnswerSources] = None,
         answers: Optional[AnswerStore] = None,

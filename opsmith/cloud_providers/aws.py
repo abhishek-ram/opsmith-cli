@@ -70,7 +70,7 @@ class AWSCloudDetail(BaseCloudProviderDetail):
     ssm_plugin: str = Field(..., description="Path to session-manager-plugin executable.")
 
 
-class AWSProvider(BaseCloudProvider):
+class AWSProvider(BaseCloudProvider[AWSAccountInfo, AWSCloudDetail]):
     """AWS cloud provider implementation."""
 
     @classmethod
@@ -241,7 +241,7 @@ class AWSProvider(BaseCloudProvider):
             plan`` tolerates it and says the options are unlisted.
         """
         with aws_errors("listing AWS regions"):
-            return AWSProvider.get_regions(resolution.events)
+            return AWSProvider.get_regions(resolution.sink)
 
     @classmethod
     def build_detail(

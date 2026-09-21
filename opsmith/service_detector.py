@@ -4,10 +4,11 @@ import threading
 import uuid
 from collections import defaultdict
 from pathlib import Path
-from typing import List, Optional
+from typing import DefaultDict, List, Optional
 
 import yaml
 from pydantic import BaseModel, Field
+from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage
 
 from opsmith.agent import AgentDeps
@@ -67,12 +68,17 @@ class ServiceDetector:
         self.events = ctx.events
         self.interact = ctx.interact
         self.deployments_path = ctx.deployments_path
-        self.agent = ctx.agent
         self.repo_map = RepoMap(ctx=ctx)
         self.agent_deps = AgentDeps(
             src_dir=Path(ctx.src_dir), tracked_files=self.repo_map.tracked_files
         )
         self.verbose = ctx.verbose
+
+    @property
+    def agent(self) -> Agent[AgentDeps, str]:
+        """The configured model. Read from the context on use, so constructing a detector does
+        not require one - see ``OpsmithContext.require_agent``."""
+        return self.ctx.require_agent()
 
     def detect_services(self, existing_config: Optional[ServiceList] = None) -> ServiceList:
         """
@@ -105,7 +111,7 @@ class ServiceDetector:
 
         service_list = run_result.output
 
-        base_slug_counts = defaultdict(int)
+        base_slug_counts: DefaultDict[str, int] = defaultdict(int)
         for service in service_list.services:
             base_slug = f"{service.language}_{service.service_type.value}".replace(" ", "_").lower()
             count = base_slug_counts[base_slug] + 1
@@ -170,7 +176,7 @@ class ServiceDetector:
 
         service_info_yaml = yaml.dump(service.model_dump(mode="json"), indent=2)
         dockerfile_content = ""
-        messages = []
+        messages: list[ModelMessage] = []
         completed = False
         attempt = 0
 
@@ -263,11 +269,16 @@ class ServiceDetector:
             text=True,
             encoding="utf-8",
         )
-        output_lines = []
+        # Popen types stdout as Optional because it is None without a pipe; this call always
+        # asks for one, so the stream is there.
+        assert process.stdout is not None
+        stdout = process.stdout
+
+        output_lines: List[str] = []
         timed_out = False
 
         def stream_reader():
-            for line in iter(process.stdout.readline, ""):
+            for line in iter(stdout.readline, ""):
                 stripped_line = line.strip()
                 output_lines.append(stripped_line)
                 self.events.output(STEP_BUILD, stripped_line)
@@ -289,7 +300,7 @@ class ServiceDetector:
 
     def _validate_dockerfile(
         self, dockerfile_content: str
-    ) -> tuple[bool, str, Optional[list[ModelMessage]]]:
+    ) -> tuple[bool, Optional[str], list[ModelMessage]]:
         """
         Validates a Dockerfile by building and running it.
         Returns success status, reason for status

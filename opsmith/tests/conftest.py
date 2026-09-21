@@ -8,7 +8,7 @@ applied can be asserted.
 
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 from unittest.mock import MagicMock
 
 import git
@@ -17,7 +17,7 @@ import rich
 from typer.testing import CliRunner
 
 from opsmith.core.context import OpsmithContext
-from opsmith.core.errors import InteractionCancelled
+from opsmith.core.errors import InteractionCancelled, OpsmithError
 from opsmith.core.events import Event, EventSink
 from opsmith.core.interaction import Notice, next_steps_of
 from opsmith.settings import settings
@@ -250,6 +250,20 @@ class FakeInteraction:
         self.next_steps.extend(next_steps_of(details))
 
 
+def hint_of(error: OpsmithError) -> str:
+    """
+    The hint an error carries, for a test asserting on its wording.
+
+    ``hint`` is optional on the class because not every failure has advice to give. A test that
+    reads one is asserting there is advice, so this says that once rather than at each call.
+
+    :param error: The error a test caught.
+    :return: Its hint.
+    """
+    assert error.hint is not None, f"{error.code} carried no hint"
+    return error.hint
+
+
 class FakeGitRepo:
     """A git repository that needs no repository on disk."""
 
@@ -329,11 +343,13 @@ class FakeTerraformProvisioner(FakeProvisioner):
         super().__init__(working_dir, step, call_log)
         self.outputs = outputs
 
-    def init_and_apply(self, variables: Dict[str, str], env_vars: Optional[Dict] = None):
+    def init_and_apply(
+        self, variables: Mapping[str, Any], env_vars: Optional[Mapping[str, Any]] = None
+    ):
         """Records the variables that would have been applied."""
         self._record("apply", variables=dict(variables), env_vars=dict(env_vars or {}))
 
-    def destroy(self, variables: Dict[str, str], env_vars: Optional[Dict] = None):
+    def destroy(self, variables: Mapping[str, Any], env_vars: Optional[Mapping[str, Any]] = None):
         """Records the variables that would have been destroyed with."""
         self._record("destroy", variables=dict(variables), env_vars=dict(env_vars or {}))
 
@@ -363,7 +379,7 @@ class FakeAnsibleProvisioner(FakeProvisioner):
     def run_playbook(
         self,
         playbook_name: str,
-        extra_vars: Dict[str, Any],
+        extra_vars: Mapping[str, Any],
         inventory: Optional[str] = None,
         user: Optional[str] = None,
     ) -> Dict[str, str]:
@@ -497,8 +513,18 @@ def provisioners() -> FakeProvisionerFactory:
 
 
 @pytest.fixture
+def git_repo(tmp_path: Path) -> FakeGitRepo:
+    """A repository that needs no checkout on disk, and counts what was asked of it."""
+    return FakeGitRepo(archive_path=tmp_path)
+
+
+@pytest.fixture
 def opsmith_context(
-    tmp_path: Path, events: RecordingSink, provisioners, interact: FakeInteraction
+    tmp_path: Path,
+    events: RecordingSink,
+    provisioners,
+    interact: FakeInteraction,
+    git_repo: FakeGitRepo,
 ) -> OpsmithContext:
     """
     A context wired entirely to fakes, for testing core code with nothing on disk.
@@ -515,5 +541,5 @@ def opsmith_context(
         agent=MagicMock(),
         provisioner_factory=provisioners,
         interact=interact,
-        git_repo=FakeGitRepo(archive_path=tmp_path),
+        git_repo=git_repo,
     )

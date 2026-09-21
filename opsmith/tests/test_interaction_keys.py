@@ -88,14 +88,16 @@ def _key_of(argument: ast.expr) -> Optional[str]:
         expression is neither a literal nor an f-string and so names nothing statically.
     """
     if isinstance(argument, ast.Constant):
-        return argument.value
+        # A constant that is not a string names no key - a number or None in this position is
+        # not a key spelled oddly, it is not a key at all.
+        return argument.value if isinstance(argument.value, str) else None
 
     if not isinstance(argument, ast.JoinedStr):
         return None
 
-    parts = []
+    parts: List[str] = []
     for value in argument.values:
-        if isinstance(value, ast.Constant):
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
             parts.append(value.value)
         else:
             parts.append(PLACEHOLDER)

@@ -8,7 +8,7 @@ anything, or need anything installed.
 
 import json
 from pathlib import Path
-from typing import List, Literal, Type
+from typing import List, Literal, Optional, Type
 from unittest.mock import MagicMock
 
 import pytest
@@ -55,14 +55,14 @@ MONOLITHIC = MonolithicDeploymentStrategy.name()
 class PlanningCloudDetail(BaseCloudProviderDetail):
     """The detail of the provider these tests plan against."""
 
-    name: Literal["PLANNING"] = Field(default=PLANNING_PROVIDER, description="Provider name.")
+    name: Literal["PLANNING"] = Field(default="PLANNING", description="Provider name.")
 
 
-class PlanningCloudProvider(BaseCloudProvider):
+class PlanningCloudProvider(BaseCloudProvider[AccountInfo, PlanningCloudDetail]):
     """A provider that declares one question and can be told to refuse detection."""
 
     #: Raised by detection when set, standing in for a machine with no credentials.
-    refusal: Exception = None
+    refusal: Optional[Exception] = None
 
     @classmethod
     def name(cls) -> str:
@@ -112,16 +112,30 @@ class PlanningCloudProvider(BaseCloudProvider):
 class SilentCloudDetail(BaseCloudProviderDetail):
     """The detail of the provider that declares nothing."""
 
-    name: Literal["SILENT"] = Field(default=SILENT_PROVIDER, description="Provider name.")
+    name: Literal["SILENT"] = Field(default="SILENT", description="Provider name.")
 
 
-class SilentCloudProvider(PlanningCloudProvider):
+class SilentCloudProvider(BaseCloudProvider[AccountInfo, SilentCloudDetail]):
     """A third-party provider that declares no questions and asks inside build_detail."""
 
     @classmethod
     def name(cls) -> str:
         """The name the deployment config refers to this provider by."""
         return SILENT_PROVIDER
+
+    @classmethod
+    def description(cls) -> str:
+        """What a menu would show next to the name."""
+        return "A provider that declares nothing."
+
+    @classmethod
+    def detect_account(cls, ctx: OpsmithContext) -> AccountInfo:
+        """Reaches no cloud."""
+        return AccountInfo()
+
+    def get_instance_types(self) -> MachineTypeList:
+        """No machine types: nothing in these tests sizes a machine."""
+        return MachineTypeList(machines=[])
 
     @classmethod
     def get_detail_model(cls) -> Type[SilentCloudDetail]:

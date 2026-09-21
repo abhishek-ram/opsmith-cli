@@ -198,7 +198,9 @@ def test_a_question_reports_the_options_its_loader_could_list():
 
     evaluation = evaluate(tree, Resolution())
 
-    assert [option.value for option in evaluation.needed[0].choices] == [
+    choices = evaluation.needed[0].choices
+    assert choices is not None
+    assert [option.value for option in choices] == [
         "us-east-1",
         "eu-west-1",
     ]

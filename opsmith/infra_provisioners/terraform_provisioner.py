@@ -3,7 +3,7 @@
 import json
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 from opsmith.core.errors import TerraformFailed
 from opsmith.core.events import EventSink
@@ -32,7 +32,7 @@ class TerraformProvisioner(BaseInfrastructureProvisioner):
 
     @staticmethod
     def _build_vars(
-        variables: Dict[str, str], env_vars: Optional[Dict[str, str]] = None
+        variables: Mapping[str, Any], env_vars: Optional[Mapping[str, Any]] = None
     ) -> tuple[list, dict]:
         vars_list = []
         for key, value in variables.items():
@@ -44,7 +44,9 @@ class TerraformProvisioner(BaseInfrastructureProvisioner):
 
         return vars_list, tf_env_vars
 
-    def init_and_apply(self, variables: Dict[str, str], env_vars: Optional[Dict[str, str]] = None):
+    def init_and_apply(
+        self, variables: Mapping[str, Any], env_vars: Optional[Mapping[str, Any]] = None
+    ):
         """
         Initializes and applies the terraform configuration.
         """
@@ -55,7 +57,7 @@ class TerraformProvisioner(BaseInfrastructureProvisioner):
 
         self._run_command(command, env=tf_env_vars)
 
-    def destroy(self, variables: Dict[str, str], env_vars: Optional[Dict[str, str]] = None):
+    def destroy(self, variables: Mapping[str, Any], env_vars: Optional[Mapping[str, Any]] = None):
         """
         Destroys the terraform-managed infrastructure.
         """

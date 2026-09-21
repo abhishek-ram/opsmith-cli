@@ -105,13 +105,16 @@ class ModelRegistry:
 
     def _load_builtin_models(self):
         """Load built-in models"""
-        for model_cls in [
+        # Spelled out because the list of differently-typed classes would otherwise join to the
+        # abstract base, which is not something `register` accepts.
+        builtin_models: List[Type[BaseAiModel]] = [
             OpenAIGPT55,
             OpenAIGPT55Pro,
             AnthropicClaudeSonnet46,
             AnthropicClaudeOpus48,
             GoogleGlaGemini3Pro,
-        ]:
+        ]
+        for model_cls in builtin_models:
             self.register(model_cls)
 
     def _load_plugin_models(self):

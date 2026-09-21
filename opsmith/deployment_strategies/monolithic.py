@@ -474,7 +474,8 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         Deploys the docker-compose stack and returns container logs for validation.
         """
         self.events.step(STEP_COMPOSE, "Deploying docker-compose stack to the VM")
-        ansible_user = environment_state.virtual_machine.user
+        virtual_machine = environment_state.require_virtual_machine()
+        ansible_user = virtual_machine.user
         deploy_compose_path, docker_compose_path = self._get_deploy_docker_compose_path(environment)
 
         ansible_runner = self.provisioners.ansible(deploy_compose_path, step=STEP_COMPOSE)
@@ -493,9 +494,9 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             "env_file_content": env_file_content,
             "dest_env_file": f"/home/{ansible_user}/app/.env",
             "ansible_user": ansible_user,
-            "registry_host_url": environment_state.registry_url.split("/")[0],
+            "registry_host_url": environment_state.require_registry_url().split("/")[0],
             "traefik_yml_content": traefik_content,
-            **environment_state.virtual_machine.model_dump(mode="json"),
+            **virtual_machine.model_dump(mode="json"),
             **environment.cloud_provider_instance.provider_detail_dump,
         }
         extra_vars.update(environment.cloud_provider_instance.provider_detail_dump)
@@ -519,7 +520,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         environment: DeploymentEnvironment,
         environment_state: MonolithicDeploymentState,
         docker_compose_content: DockerComposeContent,
-    ) -> Tuple[bool, str, list[ModelMessage], str]:
+    ) -> Tuple[bool, Optional[str], list[ModelMessage], str]:
         deploy_compose_path, docker_compose_path = self._get_deploy_docker_compose_path(environment)
         with open(docker_compose_path, "w", encoding="utf-8") as f:
             f.write(docker_compose_content.content)
@@ -618,7 +619,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             content = template.render(
                 version=infra.version,
                 app_name=deployment_config.app_name_slug,
-                architecture=environment_state.virtual_machine.architecture.value,
+                architecture=environment_state.require_virtual_machine().architecture.value,
                 environment_name=environment.name,
             )
             infra_snippets_list.append(f"# {infra.provider}\n{content}")
@@ -696,6 +697,11 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
 
             _, docker_compose_path = self._get_deploy_docker_compose_path(environment)
 
+            # The loop above assigns this on every pass, and it runs at least once for any
+            # sensible attempt count, so reaching the manual editor without a file to edit is a
+            # wiring mistake rather than anything the run did.
+            assert docker_compose_content is not None
+
             while not is_successful:
                 docker_compose_content.content = self.interact.edit(
                     "compose.edit",
@@ -735,7 +741,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         Returns:
             (has_changes, change_details)
         """
-        changes = {
+        changes: Dict[str, List] = {
             "services_added": [],
             "services_removed": [],
             "services_modified": [],
@@ -1334,7 +1340,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         if other_services:
             if env_state.virtual_machine:
                 images = self._build_and_push_images(
-                    deployment_config, environment, env_state.registry_url
+                    deployment_config, environment, env_state.require_registry_url()
                 )
 
                 ansible_user = env_state.virtual_machine.user
@@ -1831,7 +1837,7 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
 
             # Rebuild and push images
             images = self._build_and_push_images(
-                deployment_config, environment, env_state.registry_url
+                deployment_config, environment, env_state.require_registry_url()
             )
 
             # Fetch existing .env file

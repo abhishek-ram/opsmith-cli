@@ -50,7 +50,12 @@ from opsmith.core.results import (
 from opsmith.deployment_strategies import DEPLOYMENT_STRATEGY_REGISTRY
 from opsmith.deployment_strategies.base import BaseDeploymentStrategy
 from opsmith.models import MODEL_REGISTRY
-from opsmith.tests.conftest import FakeGitRepo, FakeInteraction, FakeProvisionerFactory
+from opsmith.tests.conftest import (
+    FakeGitRepo,
+    FakeInteraction,
+    FakeProvisionerFactory,
+    hint_of,
+)
 from opsmith.types import (
     DeploymentConfig,
     DeploymentEnvironment,
@@ -262,8 +267,14 @@ def deployed(deployment_config: DeploymentConfig, ctx: OpsmithContext) -> Deploy
 
 
 @pytest.fixture
-def ctx(tmp_path: Path, events, provisioners, interact: FakeInteraction) -> OpsmithContext:
-    """A context wired to the fakes, with nothing on disk but the deployments directory."""
+def ctx(
+    tmp_path: Path, events, provisioners, interact: FakeInteraction, git_repo: FakeGitRepo
+) -> OpsmithContext:
+    """A context wired to the fakes, with nothing on disk but the deployments directory.
+
+    The repository comes from the shared fixture rather than being built here, so a test that
+    asserts on what was asked of it is looking at the same object the run used.
+    """
     return OpsmithContext(
         src_dir=tmp_path,
         deployments_path=tmp_path / ".opsmith",
@@ -271,7 +282,7 @@ def ctx(tmp_path: Path, events, provisioners, interact: FakeInteraction) -> Opsm
         agent=MagicMock(),
         provisioner_factory=provisioners,
         interact=interact,
-        git_repo=FakeGitRepo(archive_path=tmp_path),
+        git_repo=git_repo,
     )
 
 
@@ -286,7 +297,7 @@ def test_load_config_without_one_points_at_setup(ctx: OpsmithContext):
     with pytest.raises(InvalidConfig) as raised:
         operations.load_config(ctx)
 
-    assert "opsmith setup" in raised.value.hint
+    assert "opsmith setup" in hint_of(raised.value)
 
 
 def test_list_environments_says_which_of_them_exist(
@@ -479,7 +490,9 @@ def test_creating_binds_the_answer_store_as_soon_as_the_name_is_known(
     operations.create_environment(ctx, deployment_config, deploy=False)
 
     assert ctx.answers.environment == "prod"
-    remembered = yaml.safe_load(ctx.answers.answers_path.read_text(encoding="utf-8"))
+    answers_path = ctx.answers.answers_path
+    assert answers_path is not None
+    remembered = yaml.safe_load(answers_path.read_text(encoding="utf-8"))
     assert remembered["env.region"] == "us-test-9"
     assert remembered["env.cloud_provider"] == "RECORDING"
 
@@ -772,7 +785,7 @@ def detector(monkeypatch, deployment_config: DeploymentConfig):
 
 
 def test_init_writes_a_configuration_without_scanning_anything(
-    ctx: OpsmithContext, interact: FakeInteraction
+    ctx: OpsmithContext, interact: FakeInteraction, git_repo: FakeGitRepo
 ):
     """
     init is the half of setup that costs nothing: a name, a file, and the gitignore entries the
@@ -786,7 +799,7 @@ def test_init_writes_a_configuration_without_scanning_anything(
     assert result.app_name_slug == "acme-app"
     saved = yaml.safe_load(Path(result.config_path).read_text())
     assert saved["services"] == []
-    assert ctx.git_repo.ensure_gitignore_calls == 1
+    assert git_repo.ensure_gitignore_calls == 1
 
 
 def test_init_refuses_to_overwrite_a_configuration_that_exists(
@@ -802,7 +815,7 @@ def test_init_refuses_to_overwrite_a_configuration_that_exists(
     with pytest.raises(InvalidConfig) as raised:
         operations.init_config(ctx)
 
-    assert "opsmith setup" in raised.value.hint
+    assert "opsmith setup" in hint_of(raised.value)
 
 
 def test_setup_confirms_each_service_and_writes_the_configuration(

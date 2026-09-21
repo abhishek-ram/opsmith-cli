@@ -11,12 +11,13 @@ from typing import Optional
 
 from pydantic_ai import Agent
 
+from opsmith.agent import AgentDeps
 from opsmith.core.answers import AnswerStore
 from opsmith.core.events import EventSink
 from opsmith.core.interaction import Interaction
-from opsmith.core.provisioners import ProvisionerFactory
+from opsmith.core.provisioners import Provisioners
 from opsmith.core.steps import StepLedger
-from opsmith.git_repo import GitRepo
+from opsmith.git_repo import GitRepo, Repository
 from opsmith.utils import project_state_dir
 
 
@@ -33,9 +34,9 @@ class OpsmithContext:
         deployments_path: Path,
         events: EventSink,
         interact: Interaction,
-        provisioner_factory: ProvisionerFactory,
-        agent: Optional[Agent] = None,
-        git_repo: Optional[GitRepo] = None,
+        provisioner_factory: Provisioners,
+        agent: Optional[Agent[AgentDeps, str]] = None,
+        git_repo: Optional[Repository] = None,
         verbose: bool = False,
         answers: Optional[AnswerStore] = None,
     ):
@@ -83,8 +84,27 @@ class OpsmithContext:
         # step can read the version without probing again.
         self.terraform_version: Optional[str] = None
 
+    def require_agent(self) -> Agent[AgentDeps, str]:
+        """
+        The configured model, for a step that cannot do its work without one.
+
+        ``agent`` is optional on the context because it is resolved after the context is built,
+        but every command body runs with one: ``handle_errors`` resolves the model just before
+        it. A step reaching this with nothing set is an invariant violation rather than anything
+        a user did, so it raises rather than returning None for each call site to re-check.
+
+        :return: The configured agent.
+        :raises RuntimeError: The context was built without a model and never given one.
+        """
+        if self.agent is None:
+            raise RuntimeError(
+                "This step needs the model, but the context has no agent. The agent is resolved"
+                " before a command body runs; a context without one is a wiring mistake."
+            )
+        return self.agent
+
     @property
-    def git_repo(self) -> GitRepo:
+    def git_repo(self) -> Repository:
         """
         The repository the run operates on, opened on first use.
 
