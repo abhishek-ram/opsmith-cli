@@ -39,15 +39,26 @@ def tmp_project(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def runner() -> CliRunner:
+def runner(monkeypatch) -> CliRunner:
     """
-    Returns a Typer CLI runner that keeps stdout and stderr apart.
+    Returns a Typer CLI runner that keeps stdout and stderr apart, with colour pinned off.
 
     Separate streams are what lets a test assert that stdout carries exactly one JSON
     envelope and nothing else.
 
+    Colour is pinned because rich decides on it from the environment, so the same assertion
+    passes on a developer's machine and fails on a runner that enables it. Styling does not
+    merely wrap the output: rich emits an option name as
+    ``\x1b[1;36m-\x1b[0m\x1b[1;36m-file\x1b[0m``, putting escape codes between the two
+    dashes, so a plain ``"--file" in result.stdout`` stops matching. Every assertion on CLI
+    output here is about what was said, not how it was painted.
+
     :return: A configured CliRunner.
     """
+    # FORCE_COLOR wins over NO_COLOR in rich, so the first has to go rather than be outvoted.
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("TERM", "dumb")
     return CliRunner()
 
 
