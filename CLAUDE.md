@@ -10,7 +10,7 @@ infrastructure with Terraform and Ansible.
 
 ```bash
 uv sync --group dev                      # install, including test deps
-uv run pytest                            # whole suite (what CI runs, on 3.12 and 3.13)
+uv run pytest                            # whole suite (what CI runs, on 3.12, 3.13 and 3.14)
 uv run pytest opsmith/tests/test_monolithic_strategy.py::test_deploy_runs_the_provisioners_in_order
 uv run pytest -k "provisioner"           # by name
 
