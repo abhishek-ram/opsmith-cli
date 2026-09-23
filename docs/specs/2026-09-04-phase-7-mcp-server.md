@@ -1,9 +1,9 @@
 # Phase 7: MCP server
 
 **Goal:** clients that cannot run a shell, or that benefit from typed tool discovery, can query, validate and plan through opsmith over MCP.
-**Depends on:** phase 6 (the skill and validator commands define what the tools expose).
+**Depends on:** phase 1 (the skill and validator commands define what the tools expose); phase 5 for the recipe tools, which is why it sits here rather than directly behind phase 1.
 **Size:** S.
-**Ships as:** 1.0.x.
+**Ships as:** 1.3.x.
 
 ## Scope
 
@@ -36,12 +36,12 @@ Working directory: the server takes `--src-dir` like the CLI, defaulting to the 
 | `get_status` | `env: string` | environment state summary: VM, registry, urls, deployed snapshot |
 | `list_recipes` | – | catalog entries |
 | `get_recipe` | `name: string` | recipe metadata, inputs, README text |
-| `analyze_repo` | – | the phase 5 inventory |
+| `analyze_repo` | – | the phase 6 inventory |
 | `render_compose` | `env: string` | rendered compose and masked env keys |
-| `plan` | `env: string` or the `env create` inputs | `PlanResult` from phase 6, no side effects |
+| `plan` | `env: string` or the `env create` inputs | the `PlanResult` of phase 1 as phase 2 extends it, no side effects |
 | `explain_error` | `error: object` | the hint and documentation excerpt for an error code |
-| `check_templates` | `env?: string` | the phase 2 `template check` result: drift, invalid overlays, hand edits |
-| `list_templates` | `env?: string` | every template with origin and variables, from the phase 2 registry |
+| `check_templates` | `env?: string` | the phase 3 `template check` result: drift, invalid overlays, hand edits |
+| `list_templates` | `env?: string` | every template with origin and variables, from the phase 3 registry |
 
 Each description ends with the CLI equivalent so a harness that has a shell can prefer it.
 
@@ -58,7 +58,15 @@ One MCP prompt, `deploy-project`, that expands to the skill's golden workflow wi
 
 ### Installer
 
-`opsmith agent install --mcp` from phase 6 writes the configuration for each selected target, using `uvx opsmith mcp` as the command so no global install is required. Formats per harness live in the same path module as the skill locations and are verified at implementation time.
+`opsmith agent install --mcp` from phase 1 writes the configuration for each selected target, using `uvx opsmith mcp` as the command so no global install is required. Formats per harness live in the same path module as the skill locations and are verified at implementation time.
+
+## Harness surface
+
+This phase consumes the skill rather than extending it: `opsmith://skill` serves the `SKILL.md`
+phase 1 ships, and the tool list is generated from the same command walk as `references/commands.md`,
+so a command added by any phase reaches both surfaces at once. The one edit to the skill is in
+`SKILL.md`'s installer section: `agent install --mcp` stops printing instructions and writes the
+configuration.
 
 ## Code changes by file
 

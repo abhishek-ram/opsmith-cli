@@ -6,12 +6,32 @@ import shutil
 import string
 import subprocess
 from dataclasses import dataclass, field
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 import dns.resolver
 
 from opsmith.settings import settings
+
+#: What the distribution is called on PyPI, which is not what the package is called on disk.
+DISTRIBUTION_NAME = "opsmith-cli"
+
+
+def package_version() -> str:
+    """
+    Returns the version of Opsmith that is running.
+
+    Read from the installed distribution rather than from ``pyproject.toml``, because a wheel
+    carries no ``pyproject.toml``. A checkout that has never been installed has no version to
+    report, which is the one case this answers "unknown" for.
+
+    :return: The version, as a string.
+    """
+    try:
+        return version(DISTRIBUTION_NAME)
+    except PackageNotFoundError:
+        return "unknown"
 
 
 @dataclass

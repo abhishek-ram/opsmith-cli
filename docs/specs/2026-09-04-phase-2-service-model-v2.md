@@ -1,9 +1,9 @@
-# Phase 1: Service model v2 and deterministic rendering
+# Phase 2: Service model v2 and deterministic rendering
 
 **Goal:** the config describes services in a strategy-neutral way, including prebuilt images, and the monolithic strategy renders docker-compose, env files and mounted files deterministically, with the model reserved for judgment: estimating what the expected workload needs and explaining failures.
 **Depends on:** phase 0.
 **Size:** XL.
-**Ships as:** 0.6.0 (schema version 2), in the same release as phase 2.
+**Ships as:** 1.0.0 (schema version 2), in the same release as phase 3.
 
 ## Scope
 
@@ -17,8 +17,8 @@
 
 ## Non-goals
 
-- Recipes themselves (phase 4). This phase makes them possible.
-- Changing detection prompts beyond what the schema forces (phase 5 rewrites them).
+- Recipes themselves (phase 5). This phase makes them possible.
+- Changing detection prompts beyond what the schema forces (phase 6 rewrites them).
 - Kubernetes. The model is designed so a future strategy maps volumes to PVCs, routes to ingress, files to config maps, healthchecks to probes, resources to requests, and init jobs to jobs, and plans node pools through the capacity hook, without schema changes.
 
 ## Design
@@ -129,7 +129,7 @@ Templates use Jinja2 with `StrictUndefined`, expression-only, plus one function 
 | `infra.<instance>` | `host`, `port`, `username`, `password`, `database`, `url` | strategy |
 | `services.<slug>` | `host`, `port` | strategy |
 | `domains.<slug>` | string | environment config |
-| `inputs.<KEY>` | string | recipe inputs (phase 4); empty until then |
+| `inputs.<KEY>` | string | recipe inputs (phase 5); empty until then |
 | `env` | environment name | config |
 | `app` | app slug | config |
 
@@ -224,7 +224,7 @@ Rules:
 
 The renderer is pure: same inputs, same bundle. Golden tests cover it.
 
-Override files are not merged by the renderer. Phase 2 hands them to Compose, which merges them at deploy time, so the renderer stays pure and overrides survive upgrades.
+Override files are not merged by the renderer. Phase 3 hands them to Compose, which merges them at deploy time, so the renderer stays pure and overrides survive upgrades.
 
 ### Deploy and validation flow
 
@@ -242,14 +242,15 @@ Override files are not merged by the renderer. Phase 2 hands them to Compose, wh
 
 ### Preview commands
 
-Two commands ship in this phase rather than with the harness work, so the first deterministic release can be previewed:
+Three of the commands the [harness spec](2026-09-04-phase-1-harness-integration.md) lists ship here, because each one needs this phase's renderer and none of them could be written before it:
 
 ```
-opsmith compose render --env NAME        # rendered docker-compose.yml plus env keys, secret values masked
-opsmith compose diff   --env NAME        # rendered file against the one currently on the VM
+opsmith compose render   --env NAME      # rendered docker-compose.yml plus env keys, secret values masked
+opsmith compose diff     --env NAME      # rendered file against the one currently on the VM
+opsmith compose validate --env NAME      # renders, then runs `docker compose config` locally
 ```
 
-`compose diff` fetches the remote compose file with `_fetch_remote_deployment_files` and prints a unified diff without deploying. The changelog for this release states that the first `release` or `update` regenerates the compose file on the VM and points at `compose diff`.
+They also give the first deterministic release something to be previewed with. `compose diff` fetches the remote compose file with `_fetch_remote_deployment_files` and prints a unified diff without deploying. The changelog for this release states that the first `release` or `update` regenerates the compose file on the VM and points at `compose diff`.
 
 ### Capacity planning
 
@@ -361,7 +362,7 @@ The first save after an upgrade asks `config.upgrade` (`--answer config.upgrade=
 
 ### Detection prompt adjustments
 
-Minimal edits so detection emits v2: the field list in `REPO_ANALYSIS_PROMPT_TEMPLATE` is generated from the pydantic JSON schema instead of being hand-written; the prompt instructs that infra-derived env vars use references such as `{{ infra.postgresql.url }}` in `value` and that `routes` be filled for web services. Full prompt rewrite is phase 5.
+Minimal edits so detection emits v2: the field list in `REPO_ANALYSIS_PROMPT_TEMPLATE` is generated from the pydantic JSON schema instead of being hand-written; the prompt instructs that infra-derived env vars use references such as `{{ infra.postgresql.url }}` in `value` and that `routes` be filled for web services. Full prompt rewrite is phase 6.
 
 ## Compatibility with existing environments
 
@@ -375,7 +376,18 @@ An environment deployed before this phase has an LLM-generated compose file and 
 6. **Change detection.** Deployed snapshots are upgraded the same way as the config, so the first `update` reports no spurious changes.
 7. **Capacity.** Existing environments have no stored plan and a default hobby workload. `update` neither re-plans nor resizes them unless the workload profile is edited, and `env resize` is always explicit.
 
-Hand edits to the generated compose file on the VM are overwritten by the first release. Phase 2 ships in the same release and provides `overrides/compose.override.yml` as the place to keep them; `compose diff` shows what would change before releasing.
+Hand edits to the generated compose file on the VM are overwritten by the first release. Phase 3 ships in the same release and provides `overrides/compose.override.yml` as the place to keep them; `compose diff` shows what would change before releasing.
+
+## Harness surface
+
+This phase invalidates more of the skill than any other, because it replaces the thing a harness
+writes. Per the [definition of done](../notes/2026-09-04-migration-plan.md#definition-of-done-for-a-phase):
+
+- `references/config-schema.md` regenerates for schema v2. The freshness test fails until it is committed.
+- `references/references.md` is new: the reference grammar for infra, services, domains and inputs, with a worked example of each. Hand-written against the resolver in this phase, since nothing generates a grammar.
+- `references/commands.md` regenerates for the `compose` commands and for `env plan`'s extended result.
+- `SKILL.md`: the hand-authoring section is rewritten for image sources, routes, volumes, files, resources and init jobs; the validate loop gains `compose render`, `compose diff` and `compose validate`; the troubleshooting table gains `DEPLOY_UNHEALTHY` and `CAPACITY_UNSATISFIABLE`, each with the command that follows it.
+- The skill must say that a v1 config is upgraded in memory and rewritten on the next save, because a harness will meet both shapes in repositories it did not write.
 
 ## Code changes by file
 
@@ -393,7 +405,7 @@ Hand edits to the generated compose file on the VM are overwritten by the first 
 | `opsmith/templates/docker_compose_deploy/*/main.yml` | copy `files/`, wait loop, `compose ps` output |
 | `opsmith/prompts.py` | delete the compose generation prompt; replace the machine-list prompt with the capacity-estimate prompt; generate field list |
 | `opsmith/templates/virtual_machine/gcp/main.tf` | `allow_stopping_for_update` so a machine type change can be applied |
-| `opsmith/main.py` / cli | `config validate` runs reference validation; `env create` gains `--instance-type` semantics above; `compose render`, `compose diff` and `env resize` |
+| `opsmith/main.py` / cli | `config validate` runs reference validation; `env create` gains `--instance-type` semantics above; `compose render`, `compose diff`, `compose validate` and `env resize` |
 | `README.md` | schema v2 documentation with examples for build and image sources |
 
 ## Acceptance criteria
@@ -424,4 +436,4 @@ Hand edits to the generated compose file on the VM are overwritten by the first 
 
 - Traefik router priorities with overlapping prefixes rely on rule length; document that recipes should list the most specific route last for readability, ordering does not matter functionally.
 - `FULL_STACK` versus `BACKEND_API`: keep both types for Dockerfile template selection; rendering treats them identically. Revisit when templates are consolidated.
-- Users who hand-edited the LLM-generated compose file lose those edits on the first release after upgrading. The changelog must say so, `compose diff` shows the change, and the compose override file from phase 2, shipped in the same release, is where such edits go.
+- Users who hand-edited the LLM-generated compose file lose those edits on the first release after upgrading. The changelog must say so, `compose diff` shows the change, and the compose override file from phase 3, shipped in the same release, is where such edits go.

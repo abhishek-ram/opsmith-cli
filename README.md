@@ -19,6 +19,9 @@ The primary goal of Opsmith is to make cloud deployments accessible to all devel
 - [User Guide](#user-guide)
   - [LLMs](#llms)
     - [Supported Models](#supported-models)
+  - [Use with Claude Code, Codex and other agents](#use-with-claude-code-codex-and-other-agents)
+    - [What the agent will do](#what-the-agent-will-do)
+    - [The safety rules](#the-safety-rules)
   - [Running Opsmith without a terminal](#running-opsmith-without-a-terminal)
     - [The commands](#the-commands)
     - [Answering questions from the command line](#answering-questions-from-the-command-line)
@@ -162,6 +165,63 @@ opsmith config schema --format markdown > SCHEMA.md
 ```
 
 Add `--output json` to any command for a single JSON document on stdout, with progress on stderr.
+
+### Use with Claude Code, Codex and other agents
+
+Opsmith ships an Agent Skill: a set of instructions that teaches a coding harness how Opsmith
+works, what it may edit, and which commands to run. Install it into your project and the agent
+can take a repository to a deployed environment without being told the commands.
+
+```shell
+opsmith agent install --target claude   # or codex, opencode, cursor, gemini, agents
+opsmith agent install --target auto     # wherever a harness is already set up here
+opsmith agent install --target claude --agents-md   # also add an Opsmith section to AGENTS.md
+opsmith agent status                    # where it is installed, and whether it is current
+opsmith agent uninstall                 # remove exactly what was installed
+```
+
+`--target` is required, because installing writes into directories belonging to your other tools
+and a project that uses one harness should not acquire five more by default. `uninstall` needs no
+target: it can only take back what it recorded putting there.
+
+This needs no model and no cloud account - it copies files - so it is safe to run first. It writes
+into `.claude/skills/`, `.agents/skills/` and the equivalent directory for Codex, OpenCode, Cursor
+and Gemini CLI. `agent status` says which of those paths have been verified against the harness
+itself; the conventions are still moving, and an unverified path is Opsmith's best reading of one.
+
+Re-run the install after upgrading Opsmith, so the skill matches the CLI. `agent
+status` reports an installed skill as `stale` when it does not.
+
+#### What the agent will do
+
+With the skill installed, an agent asked to deploy a repository will typically write
+`.opsmith/deployments.yml` itself, from what it reads in your code, then have Opsmith check it:
+
+```shell
+opsmith --output json config validate
+opsmith --output json dockerfile validate
+opsmith --output json env plan --name dev --provider AWS --strategy Monolithic
+opsmith --output json env create --name dev --provider AWS --region us-east-1 --strategy Monolithic
+```
+
+`dockerfile validate` is the one command added for this: it builds each service's Dockerfile and
+runs the image, and reports what happened. It exits 4 when a Dockerfile is at fault, and 0 when the
+container merely exited for want of a database it has not been given yet - so an agent does not
+try to fix a file that is already correct.
+
+#### The safety rules
+
+The skill tells the agent, in as many words:
+
+- Only `.opsmith/deployments.yml` and the Dockerfiles are yours to edit. Everything under
+  `.opsmith/environments/` belongs to Opsmith and is rebuilt or is state.
+- Never run terraform or ansible by hand inside `.opsmith/`.
+- Never destroy an environment the user has not named. There is no flag that approves an
+  irreversible action in advance: `destroy` needs `--answer delete.confirm=DELETE`, spelled out,
+  and `--accept-defaults` refuses it.
+
+The long version, including the table of install paths, is in
+[docs/reference/2026-09-21-agent-skill.md](docs/reference/2026-09-21-agent-skill.md).
 
 ### Running Opsmith without a terminal
 

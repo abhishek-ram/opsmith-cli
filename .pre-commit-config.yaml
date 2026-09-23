@@ -22,6 +22,15 @@ repos:
           - tomli
   - repo: local
     hooks:
+      - id: build-skill-refs
+        name: regenerate the agent skill references
+        # It regenerates rather than complaining, so a change to a command or the schema updates
+        # the skill in the same commit. CI enforces it separately, through test_skill_refs.py,
+        # because CI runs pytest and nothing else.
+        entry: uv run python scripts/build_skill_refs.py
+        language: system
+        pass_filenames: false
+        files: ^(opsmith/(cli|core)/|opsmith/types\.py|scripts/build_skill_refs\.py)
       - id: mypy
         name: mypy
         # Run through uv rather than mirrors-mypy: the pydantic plugin has to import the same

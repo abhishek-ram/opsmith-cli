@@ -4,6 +4,51 @@ All notable changes to Opsmith are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-09-21
+
+Coding-harness integration, phase 1 of the
+[migration to 1.0](docs/notes/2026-09-04-migration-plan.md): Opsmith ships the instructions a
+coding agent needs in order to drive it.
+
+### Added
+
+- **An Agent Skill, shipped in the package and installed into your harness.**
+  `opsmith agent install --target claude` copies it into `.claude/skills/`, and the other
+  targets are `agents`, `codex`, `opencode`, `cursor`, `gemini`, plus `auto`;
+  `--target` is required, because installing writes into directories belonging to your other
+  tools; `opsmith agent status` says where it is
+  and whether it is the version you are running; `opsmith agent uninstall` removes exactly what
+  was installed and nothing else. None of the three needs a model or a cloud account, because
+  copying files does not. `--agents-md` additionally writes an Opsmith section into `AGENTS.md`
+  and an `@AGENTS.md` import into `CLAUDE.md`, between markers, so re-running updates in place.
+  The skill teaches the workflow, the ownership rules for `.opsmith/`, the exit codes and the
+  run-again loop; two of its four references are generated from the CLI and the pydantic models,
+  so they cannot drift from the code.
+- **`opsmith dockerfile validate [--service SLUG] [--timeout S]`** builds each service's
+  Dockerfile and runs the image, and reports the build and run outcome with the last fifty lines
+  of each. It exits 4 when the model judges the failure to be the Dockerfile's fault, with the
+  report in `error.details`, and exits 0 when it does not - a container that exits because the
+  database it wants does not exist yet is not a broken Dockerfile, and an agent should not try to
+  fix one. With no `--service` it checks every service built from a Dockerfile. `--timeout`
+  lengthens the container watch; the build ceiling is not configurable, because shortening it
+  would turn a slow but correct build into a failure.
+- **`opsmith --version`**, so a harness can tell which release's instructions it is holding.
+
+### Changed
+
+- `opsmith config validate`, `config schema` and `config show` return typed results rather than
+  ad-hoc dictionaries. The JSON envelopes are unchanged; what changes is that the generated
+  command reference can now name each one's result model, which was the point.
+- `opsmith run` and everything else that exits with a status of its own is now described as such
+  in the generated reference, derived from the result model rather than written down, so a second
+  such command would inherit the note.
+
+### Fixed
+
+- A Terraform output that cannot be parsed as JSON now carries a hint naming the command to run in
+  the working directory, like every other failure. It was the one error in the package raised
+  without one.
+
 ## [0.5.0] - 2026-09-20
 
 The headless core, phase 0 of the [migration to 1.0](docs/notes/2026-09-04-migration-plan.md),

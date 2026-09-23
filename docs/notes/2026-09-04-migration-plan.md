@@ -1,44 +1,53 @@
 # Opsmith migration plan
 
-Status: draft v1, 2026-09-04.
+Status: draft v2, 2026-09-20 — phases renumbered, harness integration moved to the front.
+Drafted 2026-09-04.
 Scope: the changes needed to (1) deploy prebuilt open-source apps through recipes, (2) integrate with coding harnesses, and (3) replace the repo map with agentic analysis, plus the foundation work all three depend on.
 
 The specs live in [`../specs/`](../specs/), one per phase:
 
 | Phase | Spec | Depends on | Size | Ships as |
 |------:|------|------------|------|----------|
-| 0 | [Headless core](../specs/2026-09-04-phase-0-headless-core/) | – | L | 0.5.0 |
-| 1 | [Service model v2 and deterministic rendering](../specs/2026-09-04-phase-1-service-model-v2.md) | 0 | XL | 0.6.0 |
-| 2 | [Customization layer](../specs/2026-09-04-phase-2-customization.md) | 0, 1 | M | 0.6.0, with phase 1 |
-| 3 | [Remote state and config sync](../specs/2026-09-04-phase-3-remote-state.md) | 0; 2 recommended first | M | 0.7.0 |
-| 4 | [Recipes](../specs/2026-09-04-phase-4-recipes.md) | 1, 2, 3 | L | 0.8.0 |
-| 5 | [Agentic repo analysis](../specs/2026-09-04-phase-5-agentic-analysis.md) | 0, 1 | M | 0.9.0 |
-| 6 | [Coding-harness integration](../specs/2026-09-04-phase-6-harness-integration.md) | 0, 1, 2; 5 soft | M | 1.0.0 |
-| 7 | [MCP server](../specs/2026-09-04-phase-7-mcp-server.md) | 6 | S | 1.0.x |
-| 8 | [Data durability](../specs/2026-09-04-phase-8-data-durability.md) | 1, 3 | M | 1.1.0 |
+| 0 | [Headless core](../specs/2026-09-04-phase-0-headless-core/) | – | L | 0.5.0, shipped |
+| 1 | [Coding-harness integration](../specs/2026-09-04-phase-1-harness-integration.md) | 0 | M | 0.6.0 |
+| 2 | [Service model v2 and deterministic rendering](../specs/2026-09-04-phase-2-service-model-v2.md) | 0 | XL | 1.0.0 |
+| 3 | [Customization layer](../specs/2026-09-04-phase-3-customization.md) | 0, 2 | M | 1.0.0, with phase 2 |
+| 4 | [Remote state and config sync](../specs/2026-09-04-phase-4-remote-state.md) | 0; 3 recommended first | M | 1.1.0 |
+| 5 | [Recipes](../specs/2026-09-04-phase-5-recipes.md) | 2, 3, 4 | L | 1.2.0 |
+| 6 | [Agentic repo analysis](../specs/2026-09-04-phase-6-agentic-analysis.md) | 0, 2 | M | 1.3.0 |
+| 7 | [MCP server](../specs/2026-09-04-phase-7-mcp-server.md) | 1; 5 for the recipe tools | S | 1.3.x |
+| 8 | [Data durability](../specs/2026-09-04-phase-8-data-durability.md) | 2, 4 | M | 1.4.0 |
 
 Phase 0 is specified as seven parts inside [its spec folder](../specs/2026-09-04-phase-0-headless-core/), each a merge unit that lands on its own; the folder's README is the index.
 
-Sizes are relative effort, not dates. Phases 3 and 5 can run in parallel with their neighbours once their dependencies have landed. Phases 1 and 2 ship in one release: the first deterministic release overwrites hand-edited compose files, and phase 2 provides the override file where those edits belong.
+**The phases were renumbered on 2026-09-20**, when harness integration moved from last to first. A phase number is its position here, so moving the work meant moving the number; the map from the old numbers is under [renumbering](#renumbering), and the shipped phase 0 specs still use the old ones.
+
+Sizes are relative effort, not dates. Phases 4 and 6 can run in parallel with their neighbours once their dependencies have landed. Phases 2 and 3 ship in one release: the first deterministic release overwrites hand-edited compose files, and phase 3 provides the override file where those edits belong.
+
+Harness integration goes first because almost all of it is already possible: the skill is instructions, its two generated references come from the Typer app and the pydantic schema that phase 0 already exposes, and the installer is file copying. What it cannot describe yet — the ownership manifest, the reference grammar, recipes, the template registry — is added by the phase that builds each one, under [definition of done](#definition-of-done-for-a-phase). The alternative was shipping the agent surface last, which would mean the tool spent its whole 0.x series being the thing agents could not drive.
 
 ```mermaid
 graph LR
-  P0[0 Headless core] --> P1[1 Service model v2]
-  P0 --> P3[3 Remote state]
-  P0 --> P5[5 Agentic analysis]
-  P1 --> P2[2 Customization]
-  P2 -. recommended .-> P3
-  P1 --> P4[4 Recipes]
-  P2 --> P4
-  P3 --> P4
-  P1 --> P5
-  P1 --> P6[6 Harness integration]
+  P0[0 Headless core] --> P1[1 Harness integration]
+  P0 --> P2[2 Service model v2]
+  P0 --> P4[4 Remote state]
+  P0 --> P6[6 Agentic analysis]
+  P2 --> P3[3 Customization]
+  P3 -. recommended .-> P4
+  P2 --> P5[5 Recipes]
+  P3 --> P5
+  P4 --> P5
   P2 --> P6
-  P5 -. soft .-> P6
-  P6 --> P7[7 MCP server]
-  P1 --> P8[8 Data durability]
-  P3 --> P8
+  P1 --> P7[7 MCP server]
+  P5 -. recipe tools .-> P7
+  P2 --> P8[8 Data durability]
+  P4 --> P8
 ```
+
+Every phase after 1 also extends the skill that phase 1 ships. That is an obligation on each of
+them rather than an edge here, because it is not a dependency in either direction: phase 5 does
+not wait for anything to add `recipes.md`, and phase 1 does not wait for phase 5 to be useful
+without it.
 
 ## Why a migration rather than three features
 
@@ -59,16 +68,16 @@ opsmith/
   core/            UI-free library: config, schema, rendering, bindings, interaction and answer store, state backends, repo index, agent tools
   cli/             Typer commands, terminal interaction, rich output, JSON output
   mcp/             MCP server exposing read/validate/plan tools over core (phase 7)
-  skills/          The Agent Skill shipped with the package and installed into harnesses (phase 6)
-  recipes/         Bundled recipes written in the deployments.yml schema (phase 4)
+  skills/          The Agent Skill shipped with the package and installed into harnesses (phase 1)
+  recipes/         Bundled recipes written in the deployments.yml schema (phase 5)
   cloud_providers/ unchanged responsibilities, prompts removed
   deployment_strategies/
                    render the strategy-neutral service model deterministically
   infra_provisioners/
                    terraform + ansible wrappers, gain backend configuration
   templates/       terraform modules, ansible playbooks, compose templates; the package defaults that
-                   project overlays under .opsmith/templates replace (phase 2)
-  prompts/         markdown prompt files (phase 5)
+                   project overlays under .opsmith/templates replace (phase 3)
+  prompts/         markdown prompt files (phase 6)
 ```
 
 Principles that hold across phases:
@@ -173,11 +182,11 @@ Stable keys used by the interaction API. Flags map onto these, and an answers fi
 | `env.region` | provider | `--region` |
 | `env.project_id`, `env.zone` | GCP provider | `--project-id`, `--zone` |
 | `env.instance_type` | monolithic | `--instance-type` |
-| `env.workload.tier`, `env.workload.description`, `env.workload.<field>` | `env create`, `update` (phase 1) | `--workload-tier`, `--workload`, generic `--answer` |
-| `env.capacity.confirm` | `env create`, `update`, `env resize` (phase 1) | `--answer env.capacity.confirm=true` |
+| `env.workload.tier`, `env.workload.description`, `env.workload.<field>` | `env create`, `update` (phase 2) | `--workload-tier`, `--workload`, generic `--answer` |
+| `env.capacity.confirm` | `env create`, `update`, `env resize` (phase 2) | `--answer env.capacity.confirm=true` |
 | `env.domain_email` | `env create`, `update` | `--domain-email` |
 | `env.domain.<slug>` | `env create`, `update` | `--domain slug=host` |
-| `env.state_backend` | `env create` (phase 3) | `--state cloud\|local` |
+| `env.state_backend` | `env create` (phase 4) | `--state cloud\|local` |
 | `envvar.<KEY>` | compose env confirmation | `--env-var KEY=VALUE` |
 | `build_env.<slug>.<KEY>` | frontend build env | `--build-env slug:KEY=VALUE` |
 | `dns.confirm` | the DNS confirmation as it stands today, over every record at once | `--answer dns.confirm=true` |
@@ -187,13 +196,13 @@ Stable keys used by the interaction API. Flags map onto these, and an answers fi
 | `delete.confirm` | `destroy` | `--answer delete.confirm=DELETE` |
 | `update.confirm_infra_changes` | `update` | `--answer update.confirm_infra_changes=true` |
 | `dockerfile.edit`, `compose.edit` | fix editors | exit 4 headless, with the path and the validate command |
-| `config.upgrade` | first save after schema upgrade (phase 1) | `--answer config.upgrade=true` |
-| `recipe.input.<KEY>` | `recipe add` (phase 4) | `--input KEY=VALUE` |
-| `template.reset.confirm`, `template.adopt.confirm` | `template reset`, `template adopt` (phase 2) | `--answer template.reset.confirm=true`, `--answer template.adopt.confirm=true` |
+| `config.upgrade` | first save after schema upgrade (phase 2) | `--answer config.upgrade=true` |
+| `recipe.input.<KEY>` | `recipe add` (phase 5) | `--input KEY=VALUE` |
+| `template.reset.confirm`, `template.adopt.confirm` | `template reset`, `template adopt` (phase 3) | `--answer template.reset.confirm=true`, `--answer template.adopt.confirm=true` |
 
 ### Ownership of `.opsmith/`
 
-Every path under `.opsmith/` belongs to exactly one category, declared in code by the ownership manifest from phase 2 and printed by `opsmith paths`:
+Every path under `.opsmith/` belongs to exactly one category, declared in code by the ownership manifest from phase 3 and printed by `opsmith paths`:
 
 | Category | Paths | Who edits |
 |----------|-------|-----------|
@@ -210,18 +219,18 @@ directory, or a build context that never read it.
 
 ### Config compatibility
 
-- `deployments.yml` gains `schema_version` in phase 1. Files without it are version 1.
+- `deployments.yml` gains `schema_version` in phase 2. Files without it are version 1.
 - Loading always upgrades in memory. Saving writes the current version and keeps a one-time backup at `.opsmith/deployments.v<old>.bak.yml`.
 - `state.yml` files under `environments/` are re-snapshotted on the next save; no manual migration.
 - Interactive commands `setup` and `deploy` keep working throughout. New headless subcommands are additive.
-- Every phase that touches a running environment has a "Compatibility with existing environments" section listing the invariants it keeps and the tests that guard them: phases 1, 2, 3, 5 and 8.
+- Every phase that touches a running environment has a "Compatibility with existing environments" section listing the invariants it keeps and the tests that guard them: phases 2, 3, 4, 6 and 8.
 
 ### Testing standard
 
 - Unit tests under `opsmith/tests/`, pytest, external calls mocked (per `CLAUDE.md`).
 - Strategies get a `ProvisionerFactory` so tests inject fake Terraform and Ansible provisioners and assert call order and variables.
 - Golden-file tests for rendered artifacts (compose, env, backend blocks) under `opsmith/tests/golden/`.
-- Fixture repositories for detection under `opsmith/tests/fixtures/repos/` (phase 5).
+- Fixture repositories for detection under `opsmith/tests/fixtures/repos/` (phase 6).
 - One manual smoke checklist per phase that touches deployment, run on both AWS and GCP before release.
 
 ### Definition of done for a phase
@@ -229,24 +238,52 @@ directory, or a build context that never read it.
 1. Acceptance criteria in the phase spec pass.
 2. Tests added for new behaviour; existing tests green.
 3. `README.md` updated for user-visible changes; `docs/` updated for contributor-visible ones.
-4. `CHANGELOG.md` entry (create the file in phase 0).
-5. Version bumped per the table above.
+4. **The harness surface is current.** Every phase from 2 on adds to the Agent Skill that phase 1
+   ships, and says in its own "Harness surface" section what it adds: the generated references it
+   regenerates, the reference file it is the first to be able to generate, the validator command it
+   contributes, and the part of `SKILL.md` — the workflow, the never-list, the troubleshooting
+   table — that its changes make wrong. Regeneration is enforced rather than remembered:
+   `test_skill_refs.py` compares the committed references against the generator's output, so a new
+   command, flag, schema field or template that was not regenerated fails CI.
+5. `CHANGELOG.md` entry (create the file in phase 0).
+6. Version bumped per the table above.
 
 ## Explicitly not doing
 
 - **Rewriting the CLI in JavaScript.** Ansible is pip-installed today and would become a user prerequisite; after phase 0 the UI layer is thin and its language barely matters. Revisit only if Ansible is replaced.
 - **Compose files as the recipe format.** Recipes are expressed in the `deployments.yml` schema so any strategy can render them.
-- **LLM-rendered docker-compose.** Rendering becomes deterministic in phase 1.
+- **LLM-rendered docker-compose.** Rendering becomes deterministic in phase 2.
 - **An LLM-free mode.** The model is part of the tool and is always configured. Steps that are pure rendering or arithmetic are deterministic for reproducibility, not to remove the model.
-- **A Kubernetes strategy.** Out of scope, but the service model and the capacity-planning hook in phase 1 are designed so one can be added without schema changes: it would implement `plan_capacity` to return node pools instead of one VM.
+- **A Kubernetes strategy.** Out of scope, but the service model and the capacity-planning hook in phase 2 are designed so one can be added without schema changes: it would implement `plan_capacity` to return node pools instead of one VM.
+
+## Renumbering
+
+On 2026-09-20 harness integration moved from the end of the plan to directly after phase 0, and
+the phases were renumbered so that the number is still the order. Phase 0, 7 and 8 kept their
+numbers; everything between shifted.
+
+| Was | Is | Spec |
+|----:|---:|------|
+| 6 | 1 | Coding-harness integration |
+| 1 | 2 | Service model v2 and deterministic rendering |
+| 2 | 3 | Customization layer |
+| 3 | 4 | Remote state and config sync |
+| 4 | 5 | Recipes |
+| 5 | 6 | Agentic repo analysis |
+
+Every unshipped spec, this plan, `CLAUDE.md` and the handful of code comments that name a phase
+were updated. **The seven phase 0 specs were not**, because a spec stops changing once it ships.
+They still say what they said in September: `0c` names "phase 1", "phase 3", "the phase 6 skill"
+and "phase 5"; `0e` names "phase 3"; `0f` and the folder's README name "phase 1"; the README also
+names "phase 5". Read every one of them through the left column of this table.
 
 ## Open questions
 
 Tracked here, resolved inside the phase that owns them.
 
-- Phase 1: whether `FULL_STACK` remains a distinct service type or becomes `BACKEND_API` with a route on `/`.
-- Phase 1: replicas under the monolithic strategy. Current answer: honoured through compose `deploy.replicas` for services without volumes; services with volumes stay at one replica.
-- Phase 3: one state bucket per cloud account versus one per environment. Current answer: per account, keyed by app slug.
-- Phase 4: policy for recipe slugs colliding with detected services. Current answer: fail with a `--slug-prefix` hint.
-- Phase 6: exact skill directories per harness at implementation time; conventions are still moving.
-- Phase 4: whether recipes may ship overlays or override files. Current answer: no, recipes use `files/` only.
+- Phase 2: whether `FULL_STACK` remains a distinct service type or becomes `BACKEND_API` with a route on `/`.
+- Phase 2: replicas under the monolithic strategy. Current answer: honoured through compose `deploy.replicas` for services without volumes; services with volumes stay at one replica.
+- Phase 4: one state bucket per cloud account versus one per environment. Current answer: per account, keyed by app slug.
+- Phase 5: policy for recipe slugs colliding with detected services. Current answer: fail with a `--slug-prefix` hint.
+- Phase 1: exact skill directories per harness at implementation time; conventions are still moving.
+- Phase 5: whether recipes may ship overlays or override files. Current answer: no, recipes use `files/` only.

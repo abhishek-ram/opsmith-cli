@@ -16,6 +16,9 @@ uv run pytest -k "provisioner"           # by name
 
 pre-commit run --all-files               # isort, black --preview -l 100, flake8, codespell, mypy
 
+uv run python scripts/build_skill_refs.py          # regenerate the skill's generated references
+uv run python scripts/build_skill_refs.py --check  # what CI asserts, through test_skill_refs.py
+
 uv run opsmith --model anthropic:claude-sonnet-4-6 --api-key "$KEY" setup
 uv run opsmith --model ... --api-key ... --output json repomap   # machine-readable mode
 
@@ -49,7 +52,10 @@ before the body, rather than in the callback — click runs the group callback b
 subcommand's `--help`, so resolving there would make `opsmith setup --help` demand the very
 configuration it is explaining. A command that declares no tools is never probed for any, which is
 what lets `opsmith config validate` run on a machine with neither docker nor terraform; the
-terraform version the check parses is recorded on the context for phase 4.
+terraform version the check parses is recorded on the context for phase 4. `@no_model` is the same
+sentence one step along - a command that declares it needs no model is never asked for one - and
+the `agent` commands are the only three that use it, because installing a skill is copying files
+and is the first thing a new user does.
 
 ## Architecture
 
@@ -57,12 +63,13 @@ terraform version the check parses is recorded on the context for phase 4.
 
 | Module | Holds |
 |--------|-------|
-| `cli/` | Everything that knows about a terminal: `app.py` (Typer assembly, global options, the error handler), `output.py` (renderers), `interaction.py` (`TerminalInteraction`), `state.py` (`CliState`), `flags.py` (the flag-to-answer table), `commands/` (one per command, plus the `@requires` declaration in its `__init__.py`) |
+| `cli/` | Everything that knows about a terminal: `app.py` (Typer assembly, global options, the error handler), `output.py` (renderers), `interaction.py` (`TerminalInteraction`), `state.py` (`CliState`), `flags.py` (the flag-to-answer table), `skill_refs.py` (the skill reference generator, here because it walks the Typer app), `agent_install.py` (where the skill goes in each harness), `commands/` (one per command, plus the `@requires` and `@no_model` declarations in its `__init__.py`) |
 | `core/` | Orchestration that never touches a terminal: `errors.py`, `events.py`, `interaction.py`, `context.py`, `provisioners.py`, `llm.py`, `config.py`, `answers.py`, `steps.py`, `questions.py`, `results.py`, `operations.py` |
 | `cloud_providers/` | AWS and GCP, plus the registry third parties plug into |
 | `deployment_strategies/` | `base.py` holds the shared steps, `monolithic.py` composes them |
 | `infra_provisioners/` | Terraform and Ansible wrappers; the only code that shells out |
 | `templates/` | Terraform modules, Ansible playbooks and compose snippets, by step and provider |
+| `skill/` | The Agent Skill, shipped in the package: `SKILL.md` and four references, two of them generated. `opsmith agent install` copies this directory to `<skills-root>/opsmith/` |
 | `agent.py`, `models.py`, `prompts.py` | The pydantic-ai agent, the LLM registry, the prompt templates |
 | `types.py` | The Pydantic models for `deployments.yml` and `state.yml` |
 | `service_detector.py`, `repo_map.py` | Detecting what a repository deploys, and the map fed to the model |
@@ -219,7 +226,8 @@ spellings drifting. Everywhere else the declaration is handed to `ask_all` and *
 
 `opsmith/agent.py` builds a `pydantic-ai` agent with two tools (read a repo-mapped file, generate a
 secret). It is called for service detection, Dockerfile generation and repair, VM sizing, compose
-generation, and judging container logs after a deploy. Prompts live in `opsmith/prompts.py`. Phase 2
+generation, judging container logs after a deploy, and - in `dockerfile validate` - judging whether
+a failed build or run is the Dockerfile's fault or something the Dockerfile cannot fix. Prompts live in `opsmith/prompts.py`. Phase 2
 of the migration below moves the rendering and arithmetic out of the model; judgment stays.
 
 ### `.opsmith/` is the user's, and is committed
@@ -254,13 +262,67 @@ was built. Parts `0a` (CLI split and errors), `0b` (context, events, provisioner
 `0c` (model configuration, tool checks, the `config` commands), `0d` (the interaction API and its
 terminal implementation), `0e` (headless mode, the answer store, resume), `0f` (the headless
 subcommands and typed results) and `0g` (provider questions and `env plan`) have all landed.
-**Phase 0 is complete and shipped as 0.5.0.** Phase 1 (coding-harness integration) is next.
+**Phase 0 is complete and shipped as 0.5.0, and phase 1 as 0.6.0.** Phase 2 (service model v2
+and deterministic rendering) is next.
 
 **The phases were renumbered on 2026-09-20**, when harness integration moved from last to first:
 old 6 became 1, and old 1 to 5 each moved up one. Phase 0, 7 and 8 kept their numbers. Everything
 in `docs/` uses the new numbers except the seven shipped phase 0 specs, which still use the old
 ones; the map is at the end of the migration plan. The numbers in the paragraphs below are the new
 ones.
+
+### The Agent Skill, and where it is described
+
+`opsmith/skill/` is the skill; `docs/reference/2026-09-21-agent-skill.md` is how it works and what
+to check before a release. The short version: two of its four references are generated by
+`opsmith/cli/skill_refs.py` and committed, `opsmith/tests/test_skill_refs.py` fails when they are
+stale, and the prose half is held to the same standard a different way - every command and flag it
+quotes has to resolve in the Typer app, and every configuration example has to validate. **Every
+phase from 2 on owns its part of the skill**, under the migration plan's definition of done.
+
+Nine deviations from the phase 1 spec.
+
+`opsmith/skill/` holds the skill's files directly, where the spec has `opsmith/skills/opsmith/`.
+The installed directory name comes from `SKILL_NAME` rather than from the source tree, which is
+one less level of repetition for the one skill that will ever ship from here.
+
+`dockerfile validate --service` is optional: with no service it checks every service built from a
+Dockerfile, as `config validate` checks the whole configuration. `--timeout` is the container
+watch only - the thirty-minute build ceiling is not configurable, because shortening it turns a
+slow but correct build into a false failure, which is the worst thing a validator can do.
+
+**A failing Dockerfile is `DOCKER_FAILED`, exit 4**, with the same report in `details` that a
+success would have carried in `result`, following `config validate` raising `InvalidConfig` on an
+invalid config. The case the model excuses - docker failed, but not because of the Dockerfile - is
+exit 0 with `ok: true`, `build_ok: false` and `dockerfile_at_fault: false`. That last field is what
+makes the pair legible rather than contradictory.
+
+The detector returns `DockerfileCheck`, not the spec's `DockerfileValidationResult`, which is one
+letter from the existing `DockerfileValidation` that carries the model's output. The command's
+envelope model is `DockerfileValidateResult`.
+
+**`opsmith agent *` does not require a configured model**, which needed `@no_model`; the spec does
+not notice that `handle_errors` demands one of every command.
+
+`agent install` edits `AGENTS.md` and `CLAUDE.md` only under `--agents-md`, not by default, and
+`--target` gained `auto`, which the spec's flag list does not carry, and has no `all`, which
+acceptance criterion 4 names. `--target` takes one harness per run, and the record accumulates
+across runs, so that criterion is met by one install per target, twice over. A user-scope
+install records itself to `~/.opsmith/agent-install.json`, not to `.opsmith/agent-install.json`: it
+is not about any one project and may happen outside a repository.
+
+`config validate|schema|show` return typed results now, which narrows the divergence recorded
+above, because the generated `commands.md` names each command's result model and *an untyped JSON
+object* would have been the entry for the most important command in the skill's workflow.
+`ConfigSchemaResult.schema_document` carries a `serialization_alias`, and `_envelope_result` dumps
+`by_alias`, because a field named `schema` shadows a method of `BaseModel` and the envelope has
+always called it `schema`.
+
+`--mcp` is a documented no-op that reports that MCP configuration arrives with phase 7, rather than
+printing instructions for something that does not exist. And **acceptance criteria 1 and 2 are
+manual**: a real harness session cannot be a pytest, and `skills-ref` is not a dependency, so the
+frontmatter assertions in `test_skill_refs.py` stand in for it. Both are in the release checklist
+at the end of the reference page.
 
 Five deviations from the `0g` spec.
 

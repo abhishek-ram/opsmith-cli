@@ -1,9 +1,9 @@
-# Phase 2: Customization layer
+# Phase 3: Customization layer
 
 **Goal:** every file opsmith uses to deploy can be customized inside the client repository, per project or per environment, without breaking upgrades, and the ownership of every path under `.opsmith/` is defined in code so people and coding agents know what they may edit.
-**Depends on:** phase 0 (context, CLI contract), phase 1 (deterministic rendering, `files`).
+**Depends on:** phase 0 (context, CLI contract), phase 2 (deterministic rendering, `files`).
 **Size:** M.
-**Ships as:** 0.6.0, in the same release as phase 1.
+**Ships as:** 1.0.0, in the same release as phase 2.
 
 ## Scope
 
@@ -16,7 +16,7 @@
 ## Non-goals
 
 - Merging YAML or HCL ourselves. Where the tool has a native override mechanism, use it; otherwise the whole file is replaced.
-- Customizing LLM prompts. Phase 5 moves them to files; overlaying them can reuse this mechanism later.
+- Customizing LLM prompts. Phase 6 moves them to files; overlaying them can reuse this mechanism later.
 
 ## Design
 
@@ -43,7 +43,7 @@
     terraform/<module>/*.tf, *.auto.tfvars
     ansible/<playbook>/pre.yml | post.yml
   files/                                  owned: static files for FileMount.source
-  recipes/                                owned (phase 4)
+  recipes/                                owned (phase 5)
   environments/<env>/
     templates/**                          owned: environment overlays, same mirror
     overrides/**                          owned: environment extension points
@@ -78,7 +78,7 @@ class TemplateSpec(BaseModel):
     per_environment: bool           # whether its working dir is per environment or global
 ```
 
-The registry is the single source for `template list` and `template show`, for validating `eject` paths, and for the generated skill reference in phase 6. A test asserts that every file under `opsmith/templates/` is registered and that every registered path exists.
+The registry is the single source for `template list` and `template show`, for validating `eject` paths, and for `references/templates.md` in the skill phase 1 shipped. A test asserts that every file under `opsmith/templates/` is registered and that every registered path exists.
 
 ### Resolver and materialization
 
@@ -92,7 +92,7 @@ class TemplateResolver:
     def materialize(self, template_dir: str, provider: str, working_dir: Path) -> MaterializeResult
 ```
 
-`materialize` replaces `copy_template`. It writes each file from its resolved origin, then copies the matching extension-point files described below, then writes `.opsmith-generated.json` listing every produced file with its origin and sha256. Files present in the previous marker but no longer produced are deleted, so removed templates do not linger. Never touched: `terraform.tfstate*`, `.terraform/`, `.terraform.lock.hcl`, and `backend.tf` from phase 3.
+`materialize` replaces `copy_template`. It writes each file from its resolved origin, then copies the matching extension-point files described below, then writes `.opsmith-generated.json` listing every produced file with its origin and sha256. Files present in the previous marker but no longer produced are deleted, so removed templates do not linger. Never touched: `terraform.tfstate*`, `.terraform/`, `.terraform.lock.hcl`, and `backend.tf` from phase 4.
 
 Materialization runs before operations that apply templates: `env create`, `release`, `update`, `run`, and the image build step. `destroy` never materializes. It uses the working directory as last applied, which matches today's behaviour, so an environment created with older templates is destroyed with the configuration that created it and never fails on a variable the older resources did not have. When the working directory is missing, for example on a fresh machine after `opsmith pull`, `destroy` materializes once and warns that current templates are being used.
 
@@ -104,12 +104,12 @@ Compose snippets and `traefik.yml` render through `jinja_env("docker_compose_sni
 
 | Tool | Mechanism | Location | Applied how |
 |------|-----------|----------|-------------|
-| Compose | override files, merged by Compose itself | `overrides/compose.override.yml`, `environments/<env>/overrides/compose.override.yml` | rendered with the phase 1 render context, materialized as `compose.override.yml` and `compose.<env>.override.yml`, passed to `docker_compose_v2` in `files:` after `docker-compose.yml`, project before environment |
+| Compose | override files, merged by Compose itself | `overrides/compose.override.yml`, `environments/<env>/overrides/compose.override.yml` | rendered with the phase 2 render context, materialized as `compose.override.yml` and `compose.<env>.override.yml`, passed to `docker_compose_v2` in `files:` after `docker-compose.yml`, project before environment |
 | Terraform | extra `.tf` files and `*_override.tf`, merged by Terraform; `*.auto.tfvars` loaded automatically | `overrides/terraform/<module>/`, `environments/<env>/overrides/terraform/<module>/` | copied into the module working dir before `init` |
 | Ansible | `include_tasks` hook points | `overrides/ansible/<template>/pre.yml` and `post.yml`, environment equivalents | copied to `hooks/` in the working dir; every opsmith playbook includes `{{ opsmith_pre_tasks }}` at the start of its first play and `{{ opsmith_post_tasks }}` at the end of its last play when those vars are defined; project hooks run before environment hooks |
-| Static files | `FileMount.source` | `files/`, `environments/<env>/files/` | resolved by the phase 1 renderer, environment first |
+| Static files | `FileMount.source` | `files/`, `environments/<env>/files/` | resolved by the phase 2 renderer, environment first |
 
-Rules for authors: override content may use `{{ }}` references from the phase 1 grammar; a `${KEY}` reference in a compose override must exist in the env file, so add the env var to the service in `deployments.yml` rather than inventing keys in overrides; new Terraform variables must have defaults or values in an `.auto.tfvars` file.
+Rules for authors: override content may use `{{ }}` references from the phase 2 grammar; a `${KEY}` reference in a compose override must exist in the env file, so add the env var to the service in `deployments.yml` rather than inventing keys in overrides; new Terraform variables must have defaults or values in an `.auto.tfvars` file.
 
 ### Eject, provenance and drift
 
@@ -151,7 +151,7 @@ class Ownership(BaseModel):
     description: str
 ```
 
-It is used by `opsmith paths`, by `template check` to detect edits under generated paths, and to generate `references/ownership.md` for the skill in phase 6.
+It is used by `opsmith paths`, by `template check` to detect edits under generated paths, and to generate `references/ownership.md`, which replaces the hand-written file phase 1 shipped.
 
 ### Template API stability
 
@@ -188,7 +188,20 @@ For a staging-only change, such as pointing ACME at the Let's Encrypt staging CA
 - Hand edits inside those directories are detected by `template check` and moved into overlays by `template adopt`; nothing is deleted before that step has been offered.
 - `destroy` keeps using the last-applied directory, so environments created by older releases can always be torn down.
 - Files already committed under generated paths stay in git until the user runs the printed `git rm --cached` command; nothing changes for them functionally.
-- This phase ships in the same release as phase 1 so that the compose override file exists at the moment the first deterministic release overwrites hand-edited compose files.
+- This phase ships in the same release as phase 2 so that the compose override file exists at the moment the first deterministic release overwrites hand-edited compose files.
+
+## Harness surface
+
+The ownership manifest and the template registry are what two of the skill's references were always
+meant to be generated from. Per the
+[definition of done](../notes/2026-09-04-migration-plan.md#definition-of-done-for-a-phase):
+
+- `references/ownership.md` stops being hand-written and is generated from the manifest; the hand-written file phase 1 shipped is deleted in the same commit, and `opsmith paths` is what the skill points a harness at for the live answer.
+- `references/templates.md` is new, generated from the registry: every template path, its variables, its hook points.
+- `references/commands.md` regenerates for `template list|show|eject|diff|check|rebase|reset|adopt`.
+- `SKILL.md` gains the customizing section it has been missing: prefer the `overrides/` extension points, eject a template only when a whole file must change, run `template check` afterwards, and put environment-scoped changes under `environments/<env>/`.
+- `SKILL.md`'s never-list narrows in the same commit. Phase 1 shipped "never edit anything under `.opsmith/environments/<env>/` except by running Opsmith", which would forbid the `environments/<env>/templates/` and `environments/<env>/overrides/` edits the customizing section recommends. It becomes: never edit the generated `environments/<env>/<module>/` directories or `state.yml`. No test catches this contradiction, since every command and flag in it still resolves, so it is checked by reading.
+- `README.md`'s ownership paragraph is rewritten to match, since it is hand-written and nothing fails when it goes stale: `.opsmith/templates/**`, `.opsmith/overrides/**` and the `templates/`, `overrides/` and `files/` directories under `environments/<env>/` become the user's, beside `deployments.yml` and the Dockerfiles.
 
 ## Code changes by file
 
@@ -214,7 +227,7 @@ For a staging-only change, such as pointing ACME at the Let's Encrypt staging CA
 1. Ejecting `docker_compose_snippets/traefik.yml`, editing it, and running `update --env dev` deploys the edited file, and a later `release` keeps it.
 2. An environment overlay wins over a project overlay, which wins over the package default, and `template list --env dev` shows the origin of each file.
 3. After upgrading opsmith to a version whose default Traefik template changed, the next `release` prints a drift warning, `template rebase` merges the change, and `template check --strict` exits 2 until it is resolved.
-4. A `compose.override.yml` adding a label to a service is applied without changing the generated `docker-compose.yml`, and `compose validate` (phase 6) validates the merged result.
+4. A `compose.override.yml` adding a label to a service is applied without changing the generated `docker-compose.yml`, and `compose validate` (phase 2) validates the merged result.
 5. A `*_override.tf` changing the VM root volume size is applied on the next `env create`.
 6. A `post.yml` hook for `virtual_machine_setup` runs after opsmith's own tasks.
 7. Hand-editing a file in a generated directory is reported by `template check` with the adopt hint, and `template adopt` moves it into the overlay.
@@ -229,10 +242,10 @@ For a staging-only change, such as pointing ACME at the Let's Encrypt staging CA
 - `test_extension_points.py`: override file ordering, Terraform copy, hook extra-vars.
 - `test_ownership.py`: classification of sample paths; gitignore block content.
 - `test_materialize_policy.py`: destroy leaves an existing working directory untouched and materializes only when it is missing.
-- Golden tests from phase 1 extended with an override file.
+- Golden tests from phase 2 extended with an override file.
 
 ## Risks and open questions
 
 - Overlaying a Jinja template ties the user to its variables; the stability rule and the `template check` warning are the mitigation.
 - Three-way merges need git; the fallback is a diff plus instructions.
-- Whether recipes may ship their own overlays or override files is left to phase 4; this layout reserves nothing for it.
+- Whether recipes may ship their own overlays or override files is left to phase 5; this layout reserves nothing for it.

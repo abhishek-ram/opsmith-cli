@@ -11,4 +11,10 @@ The boundary with [`specs/`](../specs/) is tense, not subject. A spec describes 
 - User-facing installation and usage: the repository [`README.md`](../../README.md).
 - Architecture, engineering conventions and project layout: [`CLAUDE.md`](../../CLAUDE.md), read from the repository root by the coding agents that work here.
 
-Nothing here yet. The first pages will most likely be the plugin contracts, which the migration's phase 0 and phase 2 change.
+## What is here now
+
+- [`2026-09-21-agent-skill.md`](2026-09-21-agent-skill.md) — the Agent Skill: what ships, where it
+  installs, what is generated from the code and what has to be written by hand.
+
+The plugin contracts will most likely be next, once the migration's phase 3 has finished changing
+them.

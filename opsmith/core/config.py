@@ -33,8 +33,10 @@ __all__ = [
     "load_config_file",
     "parse_infra_deps",
     "parse_service",
+    "markdown_section",
     "schema_to_markdown",
     "validate_config_data",
+    "type_name",
     "validate_config_file",
     "warn_incompatible_providers",
 ]
@@ -286,7 +288,7 @@ def config_json_schema() -> Dict:
     return DeploymentConfig.model_json_schema()
 
 
-def _type_name(schema: Dict) -> str:
+def type_name(schema: Dict) -> str:
     """
     Names the type of one property, as far as a table cell can.
 
@@ -297,17 +299,17 @@ def _type_name(schema: Dict) -> str:
         return schema["$ref"].rsplit("/", 1)[-1]
 
     if "anyOf" in schema:
-        return " | ".join(_type_name(option) for option in schema["anyOf"])
+        return " | ".join(type_name(option) for option in schema["anyOf"])
 
     kind = schema.get("type")
     if kind == "array":
-        return f"{_type_name(schema.get('items', {}))}[]"
+        return f"{type_name(schema.get('items', {}))}[]"
     if kind is None and "enum" in schema:
         return " | ".join(str(value) for value in schema["enum"])
     return str(kind) if kind is not None else "any"
 
 
-def _markdown_section(name: str, definition: Dict) -> List[str]:
+def markdown_section(name: str, definition: Dict) -> List[str]:
     """
     Renders one model of the schema as a markdown section.
 
@@ -332,7 +334,7 @@ def _markdown_section(name: str, definition: Dict) -> List[str]:
     for field_name, field_schema in properties.items():
         default = field_schema.get("default", "")
         lines.append(
-            f"| `{field_name}` | {_type_name(field_schema)} |"
+            f"| `{field_name}` | {type_name(field_schema)} |"
             f" {'yes' if field_name in required else 'no'} |"
             f" {f'`{default}`' if default != '' else ''} |"
             f" {field_schema.get('description', '')} |"
@@ -349,9 +351,9 @@ def schema_to_markdown(schema: Dict) -> str:
     :return: The markdown document.
     """
     lines = [f"# {schema.get('title', 'DeploymentConfig')}", ""]
-    lines += _markdown_section(schema.get("title", "DeploymentConfig"), schema)[2:]
+    lines += markdown_section(schema.get("title", "DeploymentConfig"), schema)[2:]
 
     for name, definition in sorted(schema.get("$defs", {}).items()):
-        lines += _markdown_section(name, definition)
+        lines += markdown_section(name, definition)
 
     return "\n".join(lines).rstrip() + "\n"

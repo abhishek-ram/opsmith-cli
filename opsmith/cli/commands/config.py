@@ -7,7 +7,7 @@ None of these commands declares an external tool, so they run anywhere the packa
 import json
 from enum import Enum
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 
 import typer
 import yaml
@@ -21,6 +21,8 @@ from opsmith.core.config import (
 )
 from opsmith.core.errors import InvalidConfig
 from opsmith.core.events import STEP_CONFIG
+from opsmith.core.operations import reported
+from opsmith.core.results import ConfigSchemaResult, ConfigShowResult, ValidateResult
 from opsmith.settings import settings
 
 
@@ -51,7 +53,7 @@ def validate(
         "--file",
         help="The configuration file to validate. Defaults to .opsmith/deployments.yml.",
     ),
-) -> Dict:
+) -> ValidateResult:
     """Validate the deployment configuration."""
     state: CliState = ctx.obj
     path = _config_path(state, file)
@@ -74,7 +76,7 @@ def validate(
     for warning in result.warnings:
         events.warning(STEP_CONFIG, f"{warning.path}: {warning.message}")
 
-    return result.model_dump()
+    return reported(state.context, result)
 
 
 def schema(
@@ -84,7 +86,7 @@ def schema(
         "--format",
         help="Whether to emit the JSON Schema itself or a markdown rendering of it.",
     ),
-) -> Dict:
+) -> ConfigSchemaResult:
     """Print the schema of the deployment configuration."""
     state: CliState = ctx.obj
     document = config_json_schema()
@@ -92,10 +94,14 @@ def schema(
     if output_format is SchemaFormat.MARKDOWN:
         markdown = schema_to_markdown(document)
         state.renderer.render_document(markdown)
-        return {"format": output_format.value, "markdown": markdown}
+        return reported(
+            state.context, ConfigSchemaResult(format=output_format.value, markdown=markdown)
+        )
 
     state.renderer.render_document(json.dumps(document, indent=2))
-    return {"format": output_format.value, "schema": document}
+    return reported(
+        state.context, ConfigSchemaResult(format=output_format.value, schema_document=document)
+    )
 
 
 def show(
@@ -105,11 +111,11 @@ def show(
         "--file",
         help="The configuration file to show. Defaults to .opsmith/deployments.yml.",
     ),
-) -> Dict:
+) -> ConfigShowResult:
     """Print the deployment configuration, as Opsmith reads it."""
     state: CliState = ctx.obj
     config = load_config_file(_config_path(state, file))
     document = config.model_dump(mode="json")
 
     state.renderer.render_document(yaml.dump(document, indent=2, sort_keys=False))
-    return {"config": document}
+    return reported(state.context, ConfigShowResult(config=document))

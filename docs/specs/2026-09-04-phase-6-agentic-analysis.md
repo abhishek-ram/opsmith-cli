@@ -1,9 +1,9 @@
-# Phase 5: Agentic repo analysis
+# Phase 6: Agentic repo analysis
 
 **Goal:** the built-in agent explores a repository with the same kind of tools a coding harness uses, instead of a pre-computed map, and detection quality is measured against fixture repositories.
-**Depends on:** phase 0 (model configuration, events), phase 1 (schema v2 output).
+**Depends on:** phase 0 (model configuration, events), phase 2 (schema v2 output).
 **Size:** M.
-**Ships as:** 0.9.0.
+**Ships as:** 1.3.0.
 
 ## Scope
 
@@ -75,9 +75,9 @@ Target size: under 2k tokens; lists are truncated with counts.
 - the JSON schema of its output type, generated from pydantic, so field docs never drift;
 - the inventory as initial context (repo analysis and Dockerfile generation);
 - an exploration strategy: start from manifests and entrypoints, confirm ports and env vars by grep, read only the ranges needed, stop when every required field has evidence;
-- the reference grammar from phase 1, instructing `value: "{{ infra.<instance>.url }}"` style references for infra-derived env vars and `routes` for web services.
+- the reference grammar from phase 2, instructing `value: "{{ infra.<instance>.url }}"` style references for infra-derived env vars and `routes` for web services.
 
-The compose generation prompt was deleted in phase 1 and the machine-list prompt became the capacity-estimate prompt. `SYSTEM_PROMPT` moves to `system.md`.
+The compose generation prompt was deleted in phase 2 and the machine-list prompt became the capacity-estimate prompt. `SYSTEM_PROMPT` moves to `system.md`.
 
 ### Guardrails
 
@@ -91,7 +91,7 @@ The compose generation prompt was deleted in phase 1 and the machine-list prompt
 After detection, before the user review step:
 
 - `build_dir`, `source.context`, and `source.dockerfile` paths must exist in the index; otherwise the field is cleared and a warning is attached.
-- Reference validation from phase 1.
+- Reference validation from phase 2.
 - Slug generation as today.
 - In headless mode the warnings go into the JSON result; `--strict` turns them into `INVALID_CONFIG`.
 
@@ -116,8 +116,16 @@ After detection, before the user review step:
 ## Compatibility with existing environments
 
 - `setup` on an existing project passes the current config to the agent as before; the result still goes through the review step, and nothing changes on any environment until `update` runs.
-- A rescan may introduce `value` references for infra-derived variables where the v1 config held literal defaults. The review step shows them, and `compose diff` from phase 1 shows the effect on an environment before it is applied.
+- A rescan may introduce `value` references for infra-derived variables where the v1 config held literal defaults. The review step shows them, and `compose diff` from phase 2 shows the effect on an environment before it is applied.
 - The `repomap` command is removed; `analyze` replaces it. Scripts that call `repomap` must change.
+
+## Harness surface
+
+Per the [definition of done](../notes/2026-09-04-migration-plan.md#definition-of-done-for-a-phase):
+
+- `references/commands.md` regenerates for `analyze` and `setup --skeleton`.
+- `SKILL.md`: the golden workflow starts from `setup --skeleton` where there is a source repository, since the skeleton is written by code from inventory facts and is a better starting point than an empty file. The skill should also say plainly when to let opsmith's own analysis run instead — when the harness has not been asked to explore, or the repository is larger than its own context allows.
+- `references/workflows.md`: the new-project workflow is rewritten around the skeleton.
 
 ## Code changes by file
 
@@ -152,6 +160,6 @@ After detection, before the user review step:
 
 ## Risks and open questions
 
-- Agentic loops cost more tokens than the old one-shot map; the inventory context, request limits and harness mode (phase 6) are the mitigations.
+- Agentic loops cost more tokens than the old one-shot map; the inventory context, request limits and harness mode (phase 1) are the mitigations.
 - Model behaviour varies across providers; the eval script is what keeps regressions visible, so it must run before releases.
 - Buildpack-style deterministic Dockerfiles (for example Railpack) would remove the LLM from the last generation step for common stacks; track as a follow-up after this phase.

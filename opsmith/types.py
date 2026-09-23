@@ -24,6 +24,16 @@ class ServiceTypeEnum(str, Enum):
     BACKEND_WORKER = "BACKEND_WORKER"
 
 
+#: The service types Opsmith builds an image for. A frontend is built on the machine that runs
+#: ``release`` and served as static files, so it has no Dockerfile to write or to validate. Named
+#: once here because both the generator and ``dockerfile validate`` have to agree about it.
+BUILDABLE_SERVICE_TYPES = (
+    ServiceTypeEnum.BACKEND_API,
+    ServiceTypeEnum.FULL_STACK,
+    ServiceTypeEnum.BACKEND_WORKER,
+)
+
+
 class DependencyTypeEnum(str, Enum):
     """Enum for the different types of infrastructure dependencies."""
 

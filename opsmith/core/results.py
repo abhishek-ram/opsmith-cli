@@ -121,6 +121,79 @@ class ValidateResult(OperationResult):
     )
 
 
+class ConfigSchemaResult(OperationResult):
+    """The schema of the deployment configuration, in the rendering that was asked for."""
+
+    format: str = Field(..., description="Which rendering this is: json or markdown.")
+    #: Named ``schema_document`` in Python and ``schema`` on the wire: a field called ``schema``
+    #: shadows a method of ``BaseModel``, and the envelope has always called this ``schema``.
+    schema_document: Optional[Dict] = Field(
+        None,
+        serialization_alias="schema",
+        description="The JSON Schema itself, when the JSON rendering was asked for.",
+    )
+    markdown: Optional[str] = Field(
+        None, description="The markdown rendering, when that was asked for."
+    )
+
+
+class ConfigShowResult(OperationResult):
+    """The deployment configuration, as Opsmith reads it."""
+
+    config: Dict = Field(..., description="The configuration, upgraded and normalised.")
+
+
+class DockerfileCheck(BaseModel):
+    """What building and running one service's Dockerfile did.
+
+    ``ok`` is the verdict to act on and is not the same as ``build_ok and run_ok``: when docker
+    fails, the model is asked whether the failure is the Dockerfile's fault, and a container that
+    exits because the database it wants does not exist yet is not. ``dockerfile_at_fault`` is what
+    keeps ``build_ok: false, ok: true`` legible.
+    """
+
+    service: str = Field(..., description="The slug of the service that was checked.")
+    dockerfile: str = Field(
+        ..., description="The Dockerfile that was checked, relative to the repo."
+    )
+    ok: bool = Field(..., description="Whether the Dockerfile is usable as it stands.")
+    build_ok: bool = Field(..., description="Whether docker build succeeded.")
+    run_ok: Optional[bool] = Field(
+        None,
+        description=(
+            "Whether the container ran. Unset when the build failed, because the run never"
+            " happened."
+        ),
+    )
+    run_timed_out: bool = Field(
+        False,
+        description=(
+            "Whether the container was still up when the watch ended, which counts as healthy."
+        ),
+    )
+    dockerfile_at_fault: Optional[bool] = Field(
+        None,
+        description=(
+            "Whether the model judged the failure fixable in the Dockerfile. Unset when docker"
+            " succeeded and nothing needed judging."
+        ),
+    )
+    explanation: Optional[str] = Field(
+        None, description="What the model said went wrong, when something did."
+    )
+    build_tail: str = Field("", description="The last lines of the build output.")
+    run_tail: str = Field("", description="The last lines of the run output.")
+
+
+class DockerfileValidateResult(OperationResult):
+    """What ``opsmith dockerfile validate`` found, over every service it checked."""
+
+    ok: bool = Field(..., description="Whether every service checked is usable as it stands.")
+    checks: List[DockerfileCheck] = Field(
+        default_factory=list, description="One check per service, in configuration order."
+    )
+
+
 class InitResult(OperationResult):
     """What ``opsmith init`` created."""
 
@@ -354,15 +427,104 @@ class DestroyResult(OperationResult):
     )
 
 
+class AgentLocationState(str, Enum):
+    """What ``opsmith agent status`` found at one skill location."""
+
+    INSTALLED = "installed"
+    STALE = "stale"
+    MISSING = "missing"
+    FOREIGN = "foreign"
+    NOT_APPLICABLE = "not_applicable"
+
+
+class AgentLocation(BaseModel):
+    """One place a harness reads skills from, and what Opsmith found there."""
+
+    target: str = Field(..., description="The harness this location belongs to.")
+    label: str = Field(..., description="What that harness is called, for a person reading.")
+    scope: str = Field(..., description="Whether this is the project or the user location.")
+    path: str = Field(..., description="The directory the skill is installed into.")
+    state: AgentLocationState = Field(..., description="What is there now.")
+    installed_version: Optional[str] = Field(
+        None, description="The version of the skill installed there, when one is."
+    )
+    verified: bool = Field(
+        ...,
+        description=(
+            "Whether this path has been confirmed against the harness itself. An unverified path"
+            " is Opsmith's best reading of a convention that is still moving."
+        ),
+    )
+
+
+class AgentInstallResult(OperationResult):
+    """What ``opsmith agent install`` wrote."""
+
+    skill: str = Field(..., description="The name the skill is installed under.")
+    version: str = Field(..., description="The version of Opsmith the skill came from.")
+    installed: List[AgentLocation] = Field(
+        default_factory=list, description="Every location the skill was written to."
+    )
+    skipped: List[AgentLocation] = Field(
+        default_factory=list, description="Locations that were not written, and why not."
+    )
+    agents_md: Optional[str] = Field(
+        None, description="The AGENTS.md that was written, when --agents-md asked for it."
+    )
+    claude_md: Optional[str] = Field(
+        None, description="The CLAUDE.md the import line was added to, when one was."
+    )
+
+
+class AgentUninstallResult(OperationResult):
+    """What ``opsmith agent uninstall`` removed."""
+
+    removed: List[AgentLocation] = Field(
+        default_factory=list, description="Every location the skill was removed from."
+    )
+    agents_md: Optional[str] = Field(
+        None, description="The AGENTS.md the managed block was stripped from, when there was one."
+    )
+    claude_md: Optional[str] = Field(
+        None, description="The CLAUDE.md the import line was removed from, when there was one."
+    )
+
+
+class AgentStatusResult(OperationResult):
+    """Where the skill is installed, and whether it is current."""
+
+    skill: str = Field(..., description="The name the skill installs under.")
+    package_version: str = Field(..., description="The version of Opsmith running.")
+    skill_version: str = Field(..., description="The version the packaged skill declares.")
+    locations: List[AgentLocation] = Field(
+        default_factory=list, description="Every location Opsmith knows about, and its state."
+    )
+    agents_md: Optional[str] = Field(
+        None, description="The AGENTS.md holding an Opsmith block, when there is one."
+    )
+    claude_md: Optional[str] = Field(
+        None, description="The CLAUDE.md importing it, when there is one."
+    )
+
+
 #: Two re-exports. A notice is part of every result even though it is declared beside the
 #: ``notify`` that produces it, and a planned question is part of a result even though it is
 #: declared beside the tree it is worked out from.
 __all__ = [
+    "AgentInstallResult",
+    "AgentLocation",
+    "AgentLocationState",
+    "AgentStatusResult",
+    "AgentUninstallResult",
     "ChoiceOption",
     "ConfigIssue",
+    "ConfigSchemaResult",
+    "ConfigShowResult",
     "DeployedService",
     "DestroyResult",
     "DnsRecord",
+    "DockerfileCheck",
+    "DockerfileValidateResult",
     "EnvCreateResult",
     "EnvListResult",
     "EnvPlanResult",

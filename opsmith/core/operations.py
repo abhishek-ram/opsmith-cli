@@ -26,12 +26,19 @@ from opsmith.core.answers import DELETE_CONFIRMATION, AnswerSources
 from opsmith.core.config import ConfigIssue, parse_infra_deps, parse_service
 from opsmith.core.context import OpsmithContext
 from opsmith.core.errors import (
+    DockerFailed,
     InvalidArgument,
     InvalidConfig,
     OpsmithError,
     UnknownService,
 )
-from opsmith.core.events import STEP_CONFIG, STEP_DETECT, STEP_DNS, STEP_SETUP
+from opsmith.core.events import (
+    STEP_BUILD,
+    STEP_CONFIG,
+    STEP_DETECT,
+    STEP_DNS,
+    STEP_SETUP,
+)
 from opsmith.core.interaction import Choice
 from opsmith.core.questions import (
     Question,
@@ -43,6 +50,8 @@ from opsmith.core.questions import (
 )
 from opsmith.core.results import (
     DestroyResult,
+    DockerfileCheck,
+    DockerfileValidateResult,
     EnvCreateResult,
     EnvironmentSummary,
     EnvListResult,
@@ -60,6 +69,7 @@ from opsmith.deployment_strategies.base import BaseDeploymentStrategy
 from opsmith.service_detector import ServiceDetector
 from opsmith.settings import settings
 from opsmith.types import (
+    BUILDABLE_SERVICE_TYPES,
     DeploymentConfig,
     DeploymentEnvironment,
     DomainInfo,
@@ -373,6 +383,160 @@ def _setup_result(
         infra_deps=deployment_config.infra_deps,
         config_path=str(ctx.deployments_path / settings.config_filename),
     )
+
+
+# --- dockerfiles --------------------------------------------------------------------------------
+
+
+def service_by_slug(deployment_config: DeploymentConfig, name_slug: str) -> ServiceInfo:
+    """
+    Finds the service a slug names.
+
+    :param deployment_config: What the repository deploys.
+    :param name_slug: The slug to look for.
+    :return: The service it names.
+    :raises UnknownService: The configuration declares no service by that slug.
+    """
+    for service in deployment_config.services:
+        if service.name_slug == name_slug:
+            return service
+
+    raise UnknownService(
+        f"'{name_slug}' is not a service this repository declares.",
+        hint="Run 'opsmith config show' to see the services this repository declares.",
+        details={
+            "service": name_slug,
+            "known": [service.name_slug for service in deployment_config.services],
+        },
+    )
+
+
+def dockerfile_path(ctx: OpsmithContext, service: ServiceInfo) -> Path:
+    """
+    :param ctx: The run's context.
+    :param service: The service whose Dockerfile to address.
+    :return: Where that service's Dockerfile lives, whether or not anybody has written it.
+    """
+    return ctx.deployments_path / "docker" / service.name_slug / "Dockerfile"
+
+
+def validate_dockerfiles(
+    ctx: OpsmithContext,
+    deployment_config: DeploymentConfig,
+    *,
+    service_name_slug: Optional[str] = None,
+    run_timeout_s: Optional[int] = None,
+) -> DockerfileValidateResult:
+    """
+    Builds and runs the Dockerfiles of this repository, and reports what happened.
+
+    This is the validator half of the bargain with a coding harness: the harness writes the
+    Dockerfile, Opsmith checks it. Nothing is generated, nothing is repaired, and nothing is
+    written - a failing check is the caller's to fix.
+
+    A failure the model judges fixable in the Dockerfile is an error, because a driver reads the
+    exit code before it reads anything else. A failure it excuses - a container that exits for want
+    of a database that does not exist yet - is reported as a notice and the run succeeds.
+
+    :param ctx: The run's context.
+    :param deployment_config: What the repository deploys.
+    :param service_name_slug: The one service to check. Every buildable service when not given.
+    :param run_timeout_s: Seconds to watch each container before counting it as healthy.
+    :return: One check per service, and whether all of them passed.
+    :raises UnknownService: The named service is not one this repository declares.
+    :raises InvalidArgument: The named service is not built from a Dockerfile, or there is no
+        Dockerfile to check.
+    :raises DockerFailed: A Dockerfile did not build, or the model judged the failure to be its
+        fault.
+    """
+    if service_name_slug is not None:
+        service = service_by_slug(deployment_config, service_name_slug)
+        if service.service_type not in BUILDABLE_SERVICE_TYPES:
+            buildable = [
+                candidate.name_slug
+                for candidate in deployment_config.services
+                if candidate.service_type in BUILDABLE_SERVICE_TYPES
+            ]
+            raise InvalidArgument(
+                f"'{service_name_slug}' is not built from a Dockerfile.",
+                hint=(
+                    f"Validate one of: {', '.join(buildable)}."
+                    if buildable
+                    else "This repository declares no service that is built from a Dockerfile."
+                ),
+                details={"service": service_name_slug, "buildable": buildable},
+            )
+        candidates = [service]
+    else:
+        candidates = [
+            service
+            for service in deployment_config.services
+            if service.service_type in BUILDABLE_SERVICE_TYPES
+        ]
+
+    to_check: List[ServiceInfo] = []
+    for service in candidates:
+        path = dockerfile_path(ctx, service)
+        if path.exists():
+            to_check.append(service)
+            continue
+        if service_name_slug is not None:
+            raise InvalidArgument(
+                f"'{service.name_slug}' has no Dockerfile.",
+                hint=f"Write {path}, or run 'opsmith setup' to generate one.",
+                details={"service": service.name_slug, "dockerfile": str(path)},
+            )
+        ctx.events.warning(STEP_BUILD, f"{service.name_slug} has no Dockerfile yet, skipping it.")
+
+    if not to_check:
+        # A validator that validated nothing must never report success.
+        raise InvalidArgument(
+            "There is no Dockerfile to validate.",
+            hint="Write one at .opsmith/docker/<service>/Dockerfile, or run 'opsmith setup'.",
+            details={"services": [service.name_slug for service in candidates]},
+        )
+
+    detector = ServiceDetector(ctx=ctx)
+    checks: List[DockerfileCheck] = []
+    for service in to_check:
+        if run_timeout_s is None:
+            checks.append(detector.validate_dockerfile(service))
+        else:
+            checks.append(detector.validate_dockerfile(service, run_timeout_s=run_timeout_s))
+
+    failed = [check for check in checks if not check.ok]
+    if failed:
+        raise DockerFailed(
+            _dockerfile_failure_message(failed),
+            hint=(
+                f"Fix {failed[0].dockerfile} and run 'opsmith dockerfile validate --service"
+                f" {failed[0].service}' again."
+            ),
+            details={"ok": False, "checks": [check.model_dump(mode="json") for check in checks]},
+        )
+
+    for check in checks:
+        if check.dockerfile_at_fault is False:
+            ctx.interact.notify(
+                (
+                    f"{check.service}: docker was unhappy, but the Dockerfile is not at fault."
+                    f" {check.explanation}"
+                ),
+                details={"service": check.service},
+            )
+
+    return reported(ctx, DockerfileValidateResult(ok=True, checks=checks))
+
+
+def _dockerfile_failure_message(failed: List[DockerfileCheck]) -> str:
+    """
+    :param failed: The checks that did not pass.
+    :return: What to tell the caller, naming the services rather than counting them.
+    """
+    if len(failed) == 1:
+        return f"The Dockerfile for {failed[0].service} is not usable."
+    names = ", ".join(check.service for check in failed)
+    return f"The Dockerfiles for {names} are not usable."
 
 
 # --- environments -------------------------------------------------------------------------------

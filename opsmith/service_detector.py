@@ -1,10 +1,12 @@
+import os
 import subprocess
 import tempfile
 import threading
 import uuid
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
-from typing import DefaultDict, List, Optional
+from typing import DefaultDict, List, Optional, Tuple
 
 import yaml
 from pydantic import BaseModel, Field
@@ -14,6 +16,7 @@ from pydantic_ai.messages import ModelMessage
 from opsmith.agent import AgentDeps
 from opsmith.core.context import OpsmithContext
 from opsmith.core.events import STEP_BUILD, STEP_DETECT
+from opsmith.core.results import DockerfileCheck
 from opsmith.prompts import (
     DOCKERFILE_GENERATION_PROMPT_TEMPLATE,
     DOCKERFILE_VALIDATION_PROMPT_TEMPLATE,
@@ -21,7 +24,31 @@ from opsmith.prompts import (
 )
 from opsmith.repo_map import RepoMap
 from opsmith.settings import settings
-from opsmith.types import ServiceInfo, ServiceList, ServiceTypeEnum
+from opsmith.types import BUILDABLE_SERVICE_TYPES, ServiceInfo, ServiceList
+
+#: How long a Dockerfile is given to build. A ceiling rather than a setting: shortening it turns a
+#: slow but correct build into a failure, which is the worst thing a validator can do.
+DOCKER_BUILD_TIMEOUT_S = 30 * 60
+
+#: How long the container is watched before it counts as healthy. ``dockerfile validate`` lets a
+#: caller lengthen this, because how long a service takes to boot is its own business.
+DOCKER_RUN_TIMEOUT_S = 60
+
+#: Trailing lines of build and run output that travel in a result. The same count as
+#: ``OUTPUT_TAIL_LINES`` in ``infra_provisioners/base_provisioner.py``, for the same reason: enough
+#: to show what went wrong without putting a whole build log into a JSON envelope.
+LOG_TAIL_LINES = 50
+
+
+def _tail(output: str, lines: int = LOG_TAIL_LINES) -> str:
+    """
+    :param output: Everything a command wrote.
+    :param lines: How many trailing lines to keep.
+    :return: The last lines of it, which is what a result carries.
+    """
+    if not output:
+        return ""
+    return "\n".join(output.splitlines()[-lines:])
 
 
 class DockerfileContent(BaseModel):
@@ -54,6 +81,29 @@ class DockerfileValidation(BaseModel):
     reason: Optional[str] = Field(
         None, description="If not successful, an explanation of what went wrong."
     )
+
+
+@dataclass
+class _DockerRun:
+    """What building and running one Dockerfile did, before anything judges it.
+
+    These are docker's own facts. Whether they amount to a usable Dockerfile is a separate
+    question, asked of the model, because a container that exits for want of a database it has not
+    been given is not a Dockerfile problem.
+    """
+
+    build_ok: bool
+    run_ok: Optional[bool]
+    build_output: str
+    run_output: str
+    run_timed_out: bool
+
+    @property
+    def docker_ok(self) -> bool:
+        """
+        :return: Whether docker was happy: the image built and the container did not exit non-zero.
+        """
+        return self.build_ok and self.run_ok is True
 
 
 class ServiceDetector:
@@ -128,12 +178,7 @@ class ServiceDetector:
         :return: Where the Dockerfile was written, or None for a service that needs none. The
             caller reports what was written, and only this knows which services those are.
         """
-        buildable_service_types = [
-            ServiceTypeEnum.BACKEND_API,
-            ServiceTypeEnum.FULL_STACK,
-            ServiceTypeEnum.BACKEND_WORKER,
-        ]
-        if service.service_type not in buildable_service_types:
+        if service.service_type not in BUILDABLE_SERVICE_TYPES:
             self.events.warning(
                 STEP_BUILD,
                 f"Dockerfile not needed for service {service.service_type}, skipping.",
@@ -298,6 +343,57 @@ class ServiceDetector:
         output_str = "\n".join(output_lines)
         return process.returncode, output_str, timed_out
 
+    def validate_dockerfile(
+        self,
+        service: ServiceInfo,
+        *,
+        build_timeout_s: int = DOCKER_BUILD_TIMEOUT_S,
+        run_timeout_s: int = DOCKER_RUN_TIMEOUT_S,
+    ) -> DockerfileCheck:
+        """
+        Builds and runs one service's Dockerfile and reports what happened, without repairing it.
+
+        This is the smoke check ``setup`` runs after generating a Dockerfile, exposed for
+        ``opsmith dockerfile validate`` so a harness that wrote its own Dockerfile can have it
+        checked. It never loops, never asks for an edit, and never regenerates anything: the caller
+        wrote the file and the caller fixes it.
+
+        :param service: The service whose Dockerfile to check.
+        :param build_timeout_s: Seconds to allow the image to build.
+        :param run_timeout_s: Seconds to watch the container before counting it as healthy.
+        :return: What docker did, and what the model made of it if docker was unhappy.
+        """
+        dockerfile_path = self.deployments_path / "docker" / service.name_slug / "Dockerfile"
+        self.events.step(STEP_BUILD, f"Validating the Dockerfile for {service.name_slug}...")
+
+        docker_run = self._build_and_run(
+            dockerfile_path.read_text(encoding="utf-8"),
+            build_timeout_s=build_timeout_s,
+            run_timeout_s=run_timeout_s,
+        )
+
+        ok = docker_run.docker_ok
+        explanation: Optional[str] = None
+        dockerfile_at_fault: Optional[bool] = None
+        if not ok:
+            verdict, _ = self._judge_docker_output(docker_run)
+            ok = verdict.is_successful
+            explanation = verdict.reason or None
+            dockerfile_at_fault = not verdict.is_successful
+
+        return DockerfileCheck(
+            service=service.name_slug,
+            dockerfile=os.path.relpath(dockerfile_path, self.ctx.src_dir),
+            ok=ok,
+            build_ok=docker_run.build_ok,
+            run_ok=docker_run.run_ok,
+            run_timed_out=docker_run.run_timed_out,
+            dockerfile_at_fault=dockerfile_at_fault,
+            explanation=explanation,
+            build_tail=_tail(docker_run.build_output),
+            run_tail=_tail(docker_run.run_output),
+        )
+
     def _validate_dockerfile(
         self, dockerfile_content: str
     ) -> tuple[bool, Optional[str], list[ModelMessage]]:
@@ -305,11 +401,58 @@ class ServiceDetector:
         Validates a Dockerfile by building and running it.
         Returns success status, reason for status
         """
+        docker_run = self._build_and_run(dockerfile_content)
+        if docker_run.docker_ok:
+            return True, "", []
+
+        verdict, messages = self._judge_docker_output(docker_run)
+        return verdict.is_successful, verdict.reason, messages
+
+    def _judge_docker_output(
+        self, docker_run: _DockerRun
+    ) -> Tuple[DockerfileValidation, list[ModelMessage]]:
+        """
+        Asks the model what a failed build or run means, and whether it is the Dockerfile's fault.
+
+        :param docker_run: What docker did, with its output untruncated - the model reads all of it.
+        :return: The model's verdict, and the messages it produced, which the repair loop feeds
+            back into the next generation attempt.
+        """
+        validation_prompt = DOCKERFILE_VALIDATION_PROMPT_TEMPLATE.format(
+            build_output=docker_run.build_output,
+            run_output=docker_run.run_output,
+        )
+        with self.events.waiting(
+            STEP_BUILD, "Waiting for the LLM to validate the Docker build output"
+        ):
+            validation_response = self.agent.run_sync(
+                validation_prompt,
+                output_type=DockerfileValidation,
+                deps=self.agent_deps,
+            )
+        return validation_response.output, validation_response.new_messages()
+
+    def _build_and_run(
+        self,
+        dockerfile_content: str,
+        *,
+        build_timeout_s: int = DOCKER_BUILD_TIMEOUT_S,
+        run_timeout_s: int = DOCKER_RUN_TIMEOUT_S,
+    ) -> _DockerRun:
+        """
+        Builds a Dockerfile and runs what it produced, and reports only what docker said.
+
+        :param dockerfile_content: The Dockerfile to build, which need not be on disk.
+        :param build_timeout_s: Seconds to allow the image to build.
+        :param run_timeout_s: Seconds to watch the container before terminating it.
+        :return: The build and run outcomes, with their output untruncated.
+        """
         repo_root = self.agent_deps.src_dir.resolve()
         image_tag = f"opsmith-build-test-{uuid.uuid4()}"
         build_output_str = ""
         run_output_str = ""
-        is_successful = True
+        run_ok: Optional[bool] = None
+        timed_out = False
 
         try:
             # Create temporary directory for Dockerfile
@@ -331,26 +474,24 @@ class ServiceDetector:
                     str(repo_root),
                 ]
                 build_rc, build_output_str, _ = self._run_command_with_streaming_output(
-                    build_command, 30 * 60
+                    build_command, build_timeout_s
                 )
 
-            # Build failed
-            if build_rc != 0:
-                is_successful = False
-            else:
+            build_ok = build_rc == 0
+            if build_ok:
                 # Build successful, now try to run the image
                 self.events.step(STEP_BUILD, "Build successful. Attempting to run the container...")
                 run_command = ["docker", "run", "--rm", image_tag]
                 run_rc, run_output_str, timed_out = self._run_command_with_streaming_output(
-                    run_command, timeout=60
+                    run_command, timeout=run_timeout_s
                 )
 
                 if timed_out:
-                    self.events.log(STEP_BUILD, "Container running for 60s, assuming success.")
+                    self.events.log(
+                        STEP_BUILD, f"Container running for {run_timeout_s}s, assuming success."
+                    )
 
-                # Run failed.
-                if run_rc != 0:
-                    is_successful = False
+                run_ok = run_rc == 0
         finally:
             # Clean up image
             cleanup_image_process = subprocess.run(
@@ -368,23 +509,10 @@ class ServiceDetector:
                     ),
                 )
 
-        if not is_successful:
-            validation_prompt = DOCKERFILE_VALIDATION_PROMPT_TEMPLATE.format(
-                build_output=build_output_str,
-                run_output=run_output_str,
-            )
-            with self.events.waiting(
-                STEP_BUILD, "Waiting for the LLM to validate the Docker build output"
-            ):
-                validation_response = self.agent.run_sync(
-                    validation_prompt,
-                    output_type=DockerfileValidation,
-                    deps=self.agent_deps,
-                )
-            return (
-                validation_response.output.is_successful,
-                validation_response.output.reason,
-                validation_response.new_messages(),
-            )
-
-        return True, "", []
+        return _DockerRun(
+            build_ok=build_ok,
+            run_ok=run_ok,
+            build_output=build_output_str,
+            run_output=run_output_str,
+            run_timed_out=timed_out,
+        )

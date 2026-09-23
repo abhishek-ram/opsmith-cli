@@ -105,6 +105,7 @@ class TerraformProvisioner(BaseInfrastructureProvisioner):
         except json.JSONDecodeError:
             raise TerraformFailed(
                 "Failed to parse Terraform outputs as JSON.",
+                hint=f"Re-run 'terraform output -json' in {self.working_dir} to see what it wrote.",
                 details={"working_dir": str(self.working_dir), "output_tail": result.stdout[-500:]},
             )
 

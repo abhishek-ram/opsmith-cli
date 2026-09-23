@@ -1,9 +1,9 @@
 # Phase 8: Data durability
 
 **Goal:** application data in a monolithic environment survives VM replacement, upgrades and mistakes, and can be restored.
-**Depends on:** phase 1 (`volumes[].backup`), phase 3 (the bucket).
+**Depends on:** phase 2 (`volumes[].backup`), phase 4 (the bucket).
 **Size:** M.
-**Ships as:** 1.1.0.
+**Ships as:** 1.4.0.
 
 Recipes make this necessary: an Odoo or Nextcloud environment holds real data, while today everything sits on the VM root disk with delete-on-termination and `destroy` removes it all.
 
@@ -23,7 +23,7 @@ Recipes make this necessary: an Odoo or Nextcloud environment holds real data, w
 
 ### Data disk
 
-New Terraform module `templates/data_disk/<provider>/` creating an EBS gp3 volume or a GCP persistent disk with `prevent_destroy = true`, tagged like other resources, sized from a new environment setting `data_disk_gb` (default: the storage total of the environment's capacity plan rounded up to 10 GB, with a 30 GB minimum; prompt key `env.data_disk_gb`, flag `--data-disk-gb`). The VM module attaches it; the setup playbook formats it on first attach only, mounts it at `/data`, and configures Docker's `data-root` or bind-mounts named volumes under `/data/volumes/<name>` so every named volume from phase 1 lands on the disk.
+New Terraform module `templates/data_disk/<provider>/` creating an EBS gp3 volume or a GCP persistent disk with `prevent_destroy = true`, tagged like other resources, sized from a new environment setting `data_disk_gb` (default: the storage total of the environment's capacity plan rounded up to 10 GB, with a 30 GB minimum; prompt key `env.data_disk_gb`, flag `--data-disk-gb`). The VM module attaches it; the setup playbook formats it on first attach only, mounts it at `/data`, and configures Docker's `data-root` or bind-mounts named volumes under `/data/volumes/<name>` so every named volume from phase 2 lands on the disk.
 
 `destroy` detaches and keeps the disk unless `--delete-data` is passed, and prints the disk id in the result. `env create` with `--attach-data-disk <id>` reuses an existing disk, which is also how a VM is replaced.
 
@@ -38,7 +38,7 @@ Environments created before this phase keep their volumes on the root disk and k
 1. Snapshot the root volume through the provider SDK and record the snapshot id in `state.yml`.
 2. Create and attach the data disk through the new Terraform module, format it once, mount it at `/data`.
 3. Stop the compose stack and copy every named volume of the project from Docker's volume directory to `/data/volumes/<name>`, preserving ownership and modes.
-4. Re-render with bind mounts under `/data/volumes`, start the stack, and run the phase 1 health validation.
+4. Re-render with bind mounts under `/data/volumes`, start the stack, and run the phase 2 health validation.
 5. On failure, restart the stack with the original mounts, leave the copied data in place for inspection, and report `DEPLOY_UNHEALTHY` naming the step that failed.
 
 Backups need no migration: they read volumes and dump databases wherever the volumes live, so an environment can start taking backups before it moves to a data disk.
@@ -54,16 +54,24 @@ opsmith backup schedule --env NAME --cron "0 3 * * *" [--retain 14]
 
 - A backup runs on the VM through a playbook: for each service volume with `backup: true`, a tar stream of the volume; for each infra instance, a logical dump using the provider's tool inside its container (`pg_dump`, `mysqldump`, `mongodump`, redis `SAVE` plus the dump file); uploaded to `<app_slug>/backups/<env>/<timestamp>/` in the state bucket using the VM's instance role, so no user credentials are copied to the VM.
 - Schedules install a cron entry on the VM running the same script; retention prunes old prefixes.
-- Restore stops the stack, restores volumes and databases, starts it, and runs the deterministic health validation from phase 1.
+- Restore stops the stack, restores volumes and databases, starts it, and runs the deterministic health validation from phase 2.
 
 ### Provider specs
 
-`InfraProviderSpec` from phase 1 gains `dump_command` and `restore_command` templates; providers without a sensible logical dump (kafka, elasticsearch, weaviate) rely on volume tars and say so in the docs.
+`InfraProviderSpec` from phase 2 gains `dump_command` and `restore_command` templates; providers without a sensible logical dump (kafka, elasticsearch, weaviate) rely on volume tars and say so in the docs.
 
 ## Compatibility with existing environments
 
 - Nothing changes for an existing environment until `data-disk migrate` is run; backups and schedules work on it immediately.
 - `destroy` keeps its current behaviour for environments without a data disk.
+
+## Harness surface
+
+Per the [definition of done](../notes/2026-09-04-migration-plan.md#definition-of-done-for-a-phase):
+
+- `references/commands.md` regenerates for the backup commands and the schedule flags.
+- `references/config-schema.md` regenerates for `backup: true` on a volume.
+- `SKILL.md`: the never-list and the destroy workflow say what a data disk keeps when an environment is destroyed, and what the restore path is. A harness that tells a user their data is gone when it is on a retained disk is worse than one that says nothing.
 
 ## Code changes by file
 

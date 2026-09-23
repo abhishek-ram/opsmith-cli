@@ -1,6 +1,6 @@
 [project]
 name = "opsmith-cli"
-version = "0.5.0"
+version = "0.6.0"
 description = "Opsmith is an AI devops engineer in your terminal"
 readme = {file = "README.md", content-type = "text/markdown"}
 classifiers = [

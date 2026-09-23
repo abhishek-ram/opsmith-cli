@@ -1,9 +1,9 @@
-# Phase 3: Remote state and config sync
+# Phase 4: Remote state and config sync
 
 **Goal:** Terraform state, the deployment config and environment state survive the loss of the user's machine, and concurrent runs are locked, whether or not the project is in git.
-**Depends on:** phase 0; phase 2 recommended first, because its materialization step is what regenerates working directories after a pull.
+**Depends on:** phase 0; phase 3 recommended first, because its materialization step is what regenerates working directories after a pull.
 **Size:** M.
-**Ships as:** 0.7.0.
+**Ships as:** 1.1.0.
 
 ## Scope
 
@@ -73,7 +73,7 @@ Through the SDKs already in the dependency list. Idempotent: an existing bucket 
 
 ### Terraform backends
 
-`TerraformProvisioner.init_and_apply` and `destroy` take a `backend_hcl` argument and write it to `backend.tf` in the working directory before `init`. `backend.tf` is exempt from the phase 2 stale-file cleanup. Module keys:
+`TerraformProvisioner.init_and_apply` and `destroy` take a `backend_hcl` argument and write it to `backend.tf` in the working directory before `init`. `backend.tf` is exempt from the phase 3 stale-file cleanup. Module keys:
 
 ```
 <app_slug>/tfstate/<env>/virtual_machine/terraform.tfstate
@@ -128,7 +128,7 @@ Object layout in the bucket:
 opsmith pull --provider AWS --app-slug myapp [--region R] [--project-id P]
 ```
 
-Detects the account with the provider's `detect_account`, derives the bucket name, downloads `config/**` into `.opsmith/`, and writes `.sync.json`. Terraform and Ansible working directories are recreated on the next command by the phase 2 materialization step, and `terraform init` reattaches the state from the backend. Nothing else lives only on disk after this phase.
+Detects the account with the provider's `detect_account`, derives the bucket name, downloads `config/**` into `.opsmith/`, and writes `.sync.json`. Terraform and Ansible working directories are recreated on the next command by the phase 3 materialization step, and `terraform init` reattaches the state from the backend. Nothing else lives only on disk after this phase.
 
 ### `opsmith state migrate`
 
@@ -156,6 +156,14 @@ Document the minimum IAM actions in `docs/permissions.md`: S3 `CreateBucket`, `P
 - `state migrate` is opt-in per project and can be run one environment at a time. Until it runs, the Terraform version requirement stays at today's minimum.
 - The registry module under `environments/global/` migrates together with the first environment in its region.
 
+## Harness surface
+
+Per the [definition of done](../notes/2026-09-04-migration-plan.md#definition-of-done-for-a-phase):
+
+- `references/commands.md` regenerates for `pull`, `state migrate`, `state show` and `env create --state`.
+- `SKILL.md`: the troubleshooting table gains exit 7, `STATE_LOCKED` and `STATE_CONFLICT`, with what to run for each — a lock is waited out, a conflict is a `pull`; the never-list gains editing or deleting objects in the state bucket by hand.
+- `references/workflows.md` gains the second-machine workflow: clone, `pull`, release. It is the first workflow a harness running on a CI runner or a fresh container needs, and until this phase there was no honest way to write it.
+
 ## Code changes by file
 
 | File | Change |
@@ -174,7 +182,7 @@ Document the minimum IAM actions in `docs/permissions.md`: S3 `CreateBucket`, `P
 1. `env create` on a new project creates the bucket, and every Terraform module has its state in the bucket and nothing in local `terraform.tfstate` files.
 2. Deleting the local `.opsmith/` directory and running `opsmith pull` followed by `opsmith release --env dev` succeeds.
 3. Two concurrent `release` runs: the second fails with `STATE_LOCKED` and does not touch infrastructure.
-4. `state migrate` on a pre-phase-3 project moves all modules and a subsequent `release` works.
+4. `state migrate` on a pre-phase-4 project moves all modules and a subsequent `release` works.
 5. With Terraform older than 1.10, `env create` fails before creating anything, with the version hint.
 
 ## Tests

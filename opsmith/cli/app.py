@@ -18,12 +18,15 @@ import rich
 import typer
 from pydantic import BaseModel
 
+from opsmith.cli.commands import agent as agent_commands
 from opsmith.cli.commands import analyze
 from opsmith.cli.commands import config as config_commands
 from opsmith.cli.commands import deploy
 from opsmith.cli.commands import env as env_commands
+from opsmith.cli.commands import needs_model
 from opsmith.cli.commands import release as release_commands
 from opsmith.cli.commands import requirements_of, setup
+from opsmith.cli.commands import validate as validate_commands
 from opsmith.cli.flags import build_interaction
 from opsmith.cli.output import (
     BaseRenderer,
@@ -45,13 +48,15 @@ from opsmith.core.provisioners import ProvisionerFactory
 from opsmith.deployment_strategies import DEPLOYMENT_STRATEGY_REGISTRY
 from opsmith.models import MODEL_REGISTRY
 from opsmith.settings import settings
-from opsmith.utils import check_external_tools, project_state_dir
+from opsmith.utils import check_external_tools, package_version, project_state_dir
 
 app = typer.Typer(pretty_exceptions_show_locals=False)
 config_app = typer.Typer(
     help="Inspect and validate the deployment configuration, without touching a cloud."
 )
 env_app = typer.Typer(help="Inspect and create the deployment environments of this repository.")
+dockerfile_app = typer.Typer(help="Check the Dockerfiles this repository declares.")
+agent_app = typer.Typer(help="Install the Opsmith skill into your coding harness.")
 
 
 #: Options whose value is a credential. They are dropped from the resume command, which is
@@ -169,7 +174,10 @@ def _envelope_result(result: Any) -> Optional[Dict]:
     :return: The payload, or None when the command returned nothing to report.
     """
     if isinstance(result, BaseModel):
-        return result.model_dump(mode="json")
+        # by_alias, because a field whose Python name cannot be what the envelope calls it says so
+        # with a serialization alias. ConfigSchemaResult.schema_document is the one today: a field
+        # named ``schema`` would shadow a method of BaseModel.
+        return result.model_dump(mode="json", by_alias=True)
     if isinstance(result, dict):
         return result
     return None
@@ -308,20 +316,23 @@ def handle_errors(func: Callable) -> Callable:
     Wraps a command body so its outcome becomes exactly one envelope and one exit code.
 
     It also holds what has to be true before a body runs: the external tools the command
-    declared are working, and the run has a configured agent.
+    declared are working, and the run has a configured agent unless the command declared it needs
+    none.
 
     :param func: The command function to wrap.
     :return: The wrapped function, with its signature preserved for Typer.
     """
     context_param = _context_param_name(func)
     tools = requirements_of(func)
+    model_needed = needs_model(func)
 
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         ctx: Optional[typer.Context] = kwargs.get(context_param) if context_param else None
         try:
             _ensure_external_tools(ctx, tools)
-            _prepare_agent(ctx)
+            if model_needed:
+                _prepare_agent(ctx)
             result = func(*args, **kwargs)
         except typer.Exit as exit_exc:
             _report_passthrough_exit(ctx, exit_exc.exit_code)
@@ -349,9 +360,31 @@ def handle_errors(func: Callable) -> Callable:
     return wrapper
 
 
+def _report_version(value: bool) -> None:
+    """
+    Prints the version and stops, before anything else is resolved.
+
+    It is eager so that ``opsmith --version`` answers on a machine with no model configured and no
+    repository to read - a harness asks this first, to know which release's instructions it holds.
+
+    :param value: Whether --version was given.
+    :raises typer.Exit: Always, when it was.
+    """
+    if value:
+        typer.echo(package_version())
+        raise typer.Exit()
+
+
 @app.callback()
 def main(
     ctx: typer.Context,
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_report_version,
+        is_eager=True,
+        help="Print the version of Opsmith and exit.",
+    ),
     model: Optional[str] = typer.Option(
         None,
         "--model",
@@ -535,3 +568,11 @@ env_app.command("plan")(handle_errors(env_commands.plan))
 env_app.command("create")(handle_errors(env_commands.create))
 env_app.command("status")(handle_errors(env_commands.status))
 app.add_typer(env_app, name="env")
+
+dockerfile_app.command("validate")(handle_errors(validate_commands.validate_dockerfile))
+app.add_typer(dockerfile_app, name="dockerfile")
+
+agent_app.command("install")(handle_errors(agent_commands.install))
+agent_app.command("uninstall")(handle_errors(agent_commands.uninstall))
+agent_app.command("status")(handle_errors(agent_commands.status))
+app.add_typer(agent_app, name="agent")

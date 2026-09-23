@@ -8,7 +8,7 @@ A spec is not a description of the code. It is written before the work, in the f
 
 Every entry here starts with the date the spec was drafted, `YYYY-MM-DD`, so the directory sorts chronologically and a stale spec is obvious at a glance. The date does not change when the spec is revised.
 
-- A spec that fits in one document is one dated file: `2026-09-04-phase-3-remote-state.md`.
+- A spec that fits in one document is one dated file: `2026-09-04-phase-4-remote-state.md`.
 - A spec large enough to be built in several merge units is a dated directory whose `README.md` is the index: `2026-09-04-phase-0-headless-core/`, with `0a-…md` through `0g-…md` inside. Files inside a dated directory are not dated again; they are ordered by the sequence they are built in.
 
 ## Shape
@@ -36,16 +36,20 @@ Conventions shared by a set of specs — CLI contracts, error codes, naming — 
 
 ## What is here now
 
-Nine phases from 0.4.x to 1.1.0, planned together in the [migration plan](../notes/2026-09-04-migration-plan.md).
+Nine phases from 0.4.x to 1.4.0, planned together in the [migration plan](../notes/2026-09-04-migration-plan.md).
 
 | Spec | Depends on | Ships as |
 |------|------------|----------|
-| [Phase 0 — headless core](2026-09-04-phase-0-headless-core/) (7 parts) | – | 0.5.0 |
-| [Phase 1 — service model v2](2026-09-04-phase-1-service-model-v2.md) | 0 | 0.6.0 |
-| [Phase 2 — customization layer](2026-09-04-phase-2-customization.md) | 0, 1 | 0.6.0 |
-| [Phase 3 — remote state](2026-09-04-phase-3-remote-state.md) | 0 | 0.7.0 |
-| [Phase 4 — recipes](2026-09-04-phase-4-recipes.md) | 1, 2, 3 | 0.8.0 |
-| [Phase 5 — agentic repo analysis](2026-09-04-phase-5-agentic-analysis.md) | 0, 1 | 0.9.0 |
-| [Phase 6 — harness integration](2026-09-04-phase-6-harness-integration.md) | 0, 1, 2 | 1.0.0 |
-| [Phase 7 — MCP server](2026-09-04-phase-7-mcp-server.md) | 6 | 1.0.x |
-| [Phase 8 — data durability](2026-09-04-phase-8-data-durability.md) | 1, 3 | 1.1.0 |
+| [Phase 0 — headless core](2026-09-04-phase-0-headless-core/) (7 parts) | – | 0.5.0, shipped |
+| [Phase 1 — harness integration](2026-09-04-phase-1-harness-integration.md) | 0 | 0.6.0 |
+| [Phase 2 — service model v2](2026-09-04-phase-2-service-model-v2.md) | 0 | 1.0.0 |
+| [Phase 3 — customization layer](2026-09-04-phase-3-customization.md) | 0, 2 | 1.0.0 |
+| [Phase 4 — remote state](2026-09-04-phase-4-remote-state.md) | 0 | 1.1.0 |
+| [Phase 5 — recipes](2026-09-04-phase-5-recipes.md) | 2, 3, 4 | 1.2.0 |
+| [Phase 6 — agentic repo analysis](2026-09-04-phase-6-agentic-analysis.md) | 0, 2 | 1.3.0 |
+| [Phase 7 — MCP server](2026-09-04-phase-7-mcp-server.md) | 1, 5 | 1.3.x |
+| [Phase 8 — data durability](2026-09-04-phase-8-data-durability.md) | 2, 4 | 1.4.0 |
+
+The numbers were shifted on 2026-09-20 when harness integration moved to the front; the phase 0
+specs, being shipped, still use the old ones. The map is at the end of the
+[migration plan](../notes/2026-09-04-migration-plan.md#renumbering).

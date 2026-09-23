@@ -187,8 +187,16 @@ def _interaction_of(cli, runner, *extra_args: str):
         """Records how this run was told to reach a person."""
         captured["interact"] = ctx.obj.context.interact
 
+    # The app is a module level singleton, so a command registered here would otherwise stay
+    # registered for every test that runs afterwards - including the one that asserts the
+    # generated command reference matches the application.
+    registered_before = list(cli.registered_commands)
     cli.command()(app_module.handle_errors(probe))
-    result = runner.invoke(cli, _base_args(*extra_args, "probe"))
+    try:
+        result = runner.invoke(cli, _base_args(*extra_args, "probe"))
+    finally:
+        cli.registered_commands = registered_before
+
     assert result.exit_code == 0, result.output
     return captured["interact"]
 

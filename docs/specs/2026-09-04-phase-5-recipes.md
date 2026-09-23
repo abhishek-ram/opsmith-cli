@@ -1,9 +1,9 @@
-# Phase 4: Recipes
+# Phase 5: Recipes
 
 **Goal:** deploy prebuilt open-source applications such as Odoo from public images, on any strategy, without a source repository and without any model-generated artifacts.
-**Depends on:** phase 1 (service model v2), phase 2 (`files/` and customization of installed recipes), phase 3 (state without git).
+**Depends on:** phase 2 (service model v2), phase 3 (`files/` and customization of installed recipes), phase 4 (state without git).
 **Size:** L.
-**Ships as:** 0.8.0.
+**Ships as:** 1.2.0.
 
 ## Scope
 
@@ -41,7 +41,7 @@ recipe:
   description: Odoo ERP and CRM
   docs: https://hub.docker.com/_/odoo
   license: LGPL-3.0
-  min_opsmith_version: "0.8.0"
+  min_opsmith_version: "1.2.0"
   tags: [erp, crm]
 
 inputs:
@@ -94,11 +94,11 @@ upgrade_notes:
   "18.0": "Run the Odoo upgrade wizard after the release completes."
 ```
 
-`services` and `infra_deps` are exactly the phase 1 models. The only recipe-specific parts are `recipe`, `inputs`, `post_deploy_message` and `upgrade_notes`. Any strategy that can render the phase 1 model can deploy a recipe.
+`services` and `infra_deps` are exactly the phase 2 models. The only recipe-specific parts are `recipe`, `inputs`, `post_deploy_message` and `upgrade_notes`. Any strategy that can render the phase 2 model can deploy a recipe.
 
 ### No install-time templating
 
-`{{ ... }}` references are resolved at deploy time by the phase 1 render context, which already has an `inputs` root. Recipe authors write literal values for anything static, including the image tag. Upgrades change literals through the provenance record, not through templates. This avoids a two-stage templating problem and keeps the installed config fully readable.
+`{{ ... }}` references are resolved at deploy time by the phase 2 render context, which already has an `inputs` root. Recipe authors write literal values for anything static, including the image tag. Upgrades change literals through the provenance record, not through templates. This avoids a two-stage templating problem and keeps the installed config fully readable.
 
 ### Inputs
 
@@ -114,7 +114,7 @@ class RecipeInput(BaseModel):
 ```
 
 - Non-secret inputs are prompted at `recipe add` with key `recipe.input.<KEY>` (flag `--input KEY=VALUE`) and stored in the config under the recipe's provenance record.
-- Secret inputs are never stored in `deployments.yml`. `generate: true` values are created by the strategy's secret store per environment, the same mechanism phase 1 uses for infra passwords; secret inputs without `generate` are prompted per environment at `env create` with key `recipe.input.<KEY>` and persisted in the environment's env store.
+- Secret inputs are never stored in `deployments.yml`. `generate: true` values are created by the strategy's secret store per environment, the same mechanism phase 2 uses for infra passwords; secret inputs without `generate` are prompted per environment at `env create` with key `recipe.input.<KEY>` and persisted in the environment's env store.
 - `inputs.<KEY>` binds to those values in the render context.
 
 ### Provenance and merge
@@ -144,8 +144,8 @@ Resolution order for `recipe add <name>`: project-local `.opsmith/recipes/<name>
 ### App-only projects
 
 - `opsmith init --app-name "My ERP"` creates `.opsmith/deployments.yml` in the current directory; no repository scan.
-- `GitRepo` becomes optional in `OpsmithContext`. It is required only for build sources (build context) and for `ensure_gitignore` when a `.git` directory exists. When absent, `init` prints a one-time recommendation to run `git init`; safety comes from phase 3.
-- `env create` with only image sources makes one model call on the happy path, the capacity estimate, which takes the recipe's declared `resources` and the environment's workload profile as input; rendering and validation are deterministic (phase 1). The model also explains a failed deployment.
+- `GitRepo` becomes optional in `OpsmithContext`. It is required only for build sources (build context) and for `ensure_gitignore` when a `.git` directory exists. When absent, `init` prints a one-time recommendation to run `git init`; safety comes from phase 4.
+- `env create` with only image sources makes one model call on the happy path, the capacity estimate, which takes the recipe's declared `resources` and the environment's workload profile as input; rendering and validation are deterministic (phase 2). The model also explains a failed deployment.
 
 ### Commands
 
@@ -178,7 +178,15 @@ Selection criteria for later additions: official or well-maintained image, multi
 
 ### Authoring guide
 
-`docs/recipes.md`: format reference generated from the pydantic models, the reference grammar table from phase 1, conventions (literal tags, `backup: true` on data volumes, `start_period_s` realistic, `resources` describing one instance at light load since the capacity plan scales them per environment, README must list the first-run steps), and the CI check.
+`docs/recipes.md`: format reference generated from the pydantic models, the reference grammar table from phase 2, conventions (literal tags, `backup: true` on data volumes, `start_period_s` realistic, `resources` describing one instance at light load since the capacity plan scales them per environment, README must list the first-run steps), and the CI check.
+
+## Harness surface
+
+Per the [definition of done](../notes/2026-09-04-migration-plan.md#definition-of-done-for-a-phase):
+
+- `references/recipes.md` is new, generated from the bundled catalog: every recipe, its inputs with types and defaults, and what it deploys.
+- `references/commands.md` regenerates for `recipe list|show|add|upgrade|remove`.
+- `SKILL.md` gains the recipe-versus-detection section, and the golden workflow branches at its first step for a project that has no source repository to explore — which is the case a harness otherwise handles by inventing a Dockerfile for something that ships an image.
 
 ## Code changes by file
 
@@ -213,6 +221,6 @@ Selection criteria for later additions: official or well-maintained image, multi
 ## Risks and open questions
 
 - Apps that need host-level features (Docker socket, host networking, privileged) are out of scope for v1 recipes; the validator rejects such fields.
-- Recipes do not ship overlays or override files in v1; users customize an installed recipe through the phase 2 mechanisms like any other service.
+- Recipes do not ship overlays or override files in v1; users customize an installed recipe through the phase 3 mechanisms like any other service.
 - Upstream images change env var contracts between majors; `upgrade_notes` and the README are the mitigation, plus pinned tags.
 - Odoo specifics: the official image reads `HOST`, `USER`, `PASSWORD` for the database and `admin_passwd` from its config file; `proxy_mode` is required behind Traefik. Verify on the smoke run.
