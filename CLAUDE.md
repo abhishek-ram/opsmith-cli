@@ -254,7 +254,7 @@ anything structural.
   ownership, the testing standard.
 - `docs/specs/` — nine phase specs. Phase 0 (headless core) is split into seven parts, `0a`–`0g`,
   each its own merge unit; its `README.md` is the index and records which acceptance criterion each
-  part proves.
+  part proves. Phase 2 is split the same way, into eight parts, `2a`–`2h`.
 - `docs/reference/` — how the system works today. Written in the present tense, maintained.
 
 A spec is written before the work and stops changing once it ships; do not amend one to match what

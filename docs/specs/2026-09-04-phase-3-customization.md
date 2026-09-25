@@ -188,7 +188,7 @@ For a staging-only change, such as pointing ACME at the Let's Encrypt staging CA
 - Hand edits inside those directories are detected by `template check` and moved into overlays by `template adopt`; nothing is deleted before that step has been offered.
 - `destroy` keeps using the last-applied directory, so environments created by older releases can always be torn down.
 - Files already committed under generated paths stay in git until the user runs the printed `git rm --cached` command; nothing changes for them functionally.
-- This phase ships in the same release as phase 2 so that the compose override file exists at the moment the first deterministic release overwrites hand-edited compose files.
+- This phase ships in the same release as phase 2 so that the compose override file exists at the moment the first `release` or `update` after upgrading overwrites compose files edited on the machine.
 
 ## Harness surface
 
@@ -249,3 +249,4 @@ meant to be generated from. Per the
 - Overlaying a Jinja template ties the user to its variables; the stability rule and the `template check` warning are the mitigation.
 - Three-way merges need git; the fallback is a diff plus instructions.
 - Whether recipes may ship their own overlays or override files is left to phase 5; this layout reserves nothing for it.
+- Phase 2's deploy repair is written to `environments/<env>/docker_compose_deploy/docker-compose.yml`, which `release` deploys, so it lasts until the next `update` renders from the config. This phase decides how a repair survives that, whether through an override, through `deployments.yml` or both, and how a fix to `deployments.yml` is proposed, confirmed and written. It also decides whether that file stays committed: `release` deploys it without comparing it with the machine's, so a checkout with an older copy would deploy that, and the generated-directory policy above would ignore it.

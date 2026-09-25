@@ -64,7 +64,7 @@ infra_deps:
 services:
   - name_slug: odoo
     source: { kind: image, image: odoo, tag: "18.0", platforms: [linux/amd64, linux/arm64] }
-    service_type: BACKEND_API
+    service_type: WEB_SERVICE
     service_port: 8069
     routes:
       - { path_prefix: "/", port: 8069 }

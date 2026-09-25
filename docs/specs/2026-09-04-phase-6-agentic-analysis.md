@@ -70,12 +70,12 @@ Target size: under 2k tokens; lists are truncated with counts.
 
 ### Prompts as files
 
-`opsmith/prompts/` with `repo_analysis.md`, `dockerfile_generation.md`, `dockerfile_validation.md`, `capacity_estimate.md`, `deploy_failure_explanation.md`, loaded through `importlib.resources`. Each prompt receives:
+`opsmith/prompts/` with `repo_analysis.md`, `dockerfile_generation.md`, `dockerfile_validation.md`, `capacity_estimate.md`, `deploy_validation.md`, loaded through `importlib.resources`. Each prompt receives:
 
 - the JSON schema of its output type, generated from pydantic, so field docs never drift;
 - the inventory as initial context (repo analysis and Dockerfile generation);
 - an exploration strategy: start from manifests and entrypoints, confirm ports and env vars by grep, read only the ranges needed, stop when every required field has evidence;
-- the reference grammar from phase 2, instructing `value: "{{ infra.<instance>.url }}"` style references for infra-derived env vars and `routes` for web services.
+- the reference grammar from phase 2, instructing `value: "{{ infra.<instance>.url }}"` style references for infra-derived env vars, `routes` for web services, and phase 2's test for secrets: `secret()` only for a value the app creates and checks itself, with third-party keys and uncertain cases left to be prompted.
 
 The compose generation prompt was deleted in phase 2 and the machine-list prompt became the capacity-estimate prompt. `SYSTEM_PROMPT` moves to `system.md`.
 

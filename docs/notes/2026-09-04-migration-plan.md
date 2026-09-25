@@ -10,7 +10,7 @@ The specs live in [`../specs/`](../specs/), one per phase:
 |------:|------|------------|------|----------|
 | 0 | [Headless core](../specs/2026-09-04-phase-0-headless-core/) | – | L | 0.5.0, shipped |
 | 1 | [Coding-harness integration](../specs/2026-09-04-phase-1-harness-integration.md) | 0 | M | 0.6.0 |
-| 2 | [Service model v2 and deterministic rendering](../specs/2026-09-04-phase-2-service-model-v2.md) | 0 | XL | 1.0.0 |
+| 2 | [Service model v2 and deterministic rendering](../specs/2026-09-04-phase-2-service-model-v2/) | 0 | XL | 1.0.0 |
 | 3 | [Customization layer](../specs/2026-09-04-phase-3-customization.md) | 0, 2 | M | 1.0.0, with phase 2 |
 | 4 | [Remote state and config sync](../specs/2026-09-04-phase-4-remote-state.md) | 0; 3 recommended first | M | 1.1.0 |
 | 5 | [Recipes](../specs/2026-09-04-phase-5-recipes.md) | 2, 3, 4 | L | 1.2.0 |
@@ -22,7 +22,7 @@ Phase 0 is specified as seven parts inside [its spec folder](../specs/2026-09-04
 
 **The phases were renumbered on 2026-09-20**, when harness integration moved from last to first. A phase number is its position here, so moving the work meant moving the number; the map from the old numbers is under [renumbering](#renumbering), and the shipped phase 0 specs still use the old ones.
 
-Sizes are relative effort, not dates. Phases 4 and 6 can run in parallel with their neighbours once their dependencies have landed. Phases 2 and 3 ship in one release: the first deterministic release overwrites hand-edited compose files, and phase 3 provides the override file where those edits belong.
+Sizes are relative effort, not dates. Phases 4 and 6 can run in parallel with their neighbours once their dependencies have landed. Phases 2 and 3 ship in one release: the first `release` or `update` after upgrading overwrites compose files edited on the machine, and phase 3 provides the override file where those edits belong.
 
 Harness integration goes first because almost all of it is already possible: the skill is instructions, its two generated references come from the Typer app and the pydantic schema that phase 0 already exposes, and the installer is file copying. What it cannot describe yet — the ownership manifest, the reference grammar, recipes, the template registry — is added by the phase that builds each one, under [definition of done](#definition-of-done-for-a-phase). The alternative was shipping the agent surface last, which would mean the tool spent its whole 0.x series being the thing agents could not drive.
 
@@ -53,7 +53,7 @@ without it.
 
 Every one of the planned capabilities is blocked by the same properties of the code today:
 
-1. **The model is used where code belongs.** `MonolithicDeploymentStrategy._generate_docker_compose` asks it to merge compose snippets and invent env values on every attempt, `_deploy_validate_docker_compose` asks it to judge success from container logs on every release, and `_select_virtual_machine_type` asks it to size a VM with no declared resource needs. Those steps are rendering and arithmetic, not judgment: they are slow, non-deterministic, untestable, and tied to one strategy. The model stays where judgment is needed, on analysis, generation, estimation and diagnosis.
+1. **The model is used where code belongs.** `MonolithicDeploymentStrategy._generate_docker_compose` asks it to merge compose snippets and invent env values on every attempt, and `_select_virtual_machine_type` asks it to size a VM with no declared resource needs. Those steps are rendering and arithmetic, not judgment: they are slow, non-deterministic, untestable, and tied to one strategy. The model stays where judgment is needed, on analysis, generation, estimation, diagnosis and deciding whether a deployment came up, though `_deploy_validate_docker_compose` has it decide that from container logs alone, with no container states to hold it to.
 2. **Every flow is interactive.** `inquirer` prompts live in `main.py`, `service_detector.py`, `deployment_strategies/monolithic.py` and inside `cloud_providers/aws.py` and `gcp.py`. An agent driving opsmith through a shell cannot answer them, and nothing can be tested end to end.
 3. **State is local-only.** Terraform state is gitignored by `GitRepo.ensure_gitignore`, so git never protected it; the only copy is on the user's disk.
 4. **Analysis is a pre-computed map.** `repo_map.py` is an aider port with the ranking removed, capped at a small token budget, and regenerated on every Dockerfile attempt.
@@ -84,7 +84,7 @@ Principles that hold across phases:
 
 - **Core is UI-free.** Nothing outside `opsmith/cli/` imports `inquirer`, `typer`, or `rich` prompt helpers. A test enforces it from phase 0 on.
 - **Every interaction has a key.** Strategies ask, confirm, wait and notify through one interaction API with stable keys, so answers can come from a terminal, flags, a file, env vars or a driving agent, and every command is safe to run again after it stops for an answer or an external action.
-- **The model does the judgment, code does the rendering.** A configured model is a requirement of the tool, not an option. It analyses repositories, generates Dockerfiles, estimates what the config does not declare, and explains failures. Rendering artifacts and checking that a deployment came up are deterministic code, so results are reproducible and testable. A coding harness may also author config and Dockerfiles itself and have opsmith validate them.
+- **The model does the judgment, code does the rendering.** A configured model is a requirement of the tool, not an option. It analyses repositories, generates Dockerfiles, estimates what the config does not declare, judges whether a deployment came up, and repairs the compose file when that is what failed. Rendering artifacts is deterministic code, so results are reproducible and testable. The judgment works over facts that code gathers (container states, health, restarts), and it cannot overrule them to call a failed container a success. A coding harness may also author config and Dockerfiles itself and have opsmith validate them.
 - **Strategies render and plan, the model estimates.** Given the service model, the bindings and a capacity estimate, a strategy produces artifacts and a machine plan deterministically. Same input, same output. How many machines and of what kind is the strategy's decision: one VM for monolithic, node pools for a future Kubernetes strategy.
 - **Recipes are configuration, not a new format.** A recipe is a partial `deployments.yml` that any strategy can render.
 - **State lives in the user's cloud account.** A per-app bucket holds Terraform state and a copy of the config, with locking.
@@ -187,7 +187,7 @@ Stable keys used by the interaction API. Flags map onto these, and an answers fi
 | `env.domain_email` | `env create`, `update` | `--domain-email` |
 | `env.domain.<slug>` | `env create`, `update` | `--domain slug=host` |
 | `env.state_backend` | `env create` (phase 4) | `--state cloud\|local` |
-| `envvar.<KEY>` | compose env confirmation | `--env-var KEY=VALUE` |
+| `envvar.<KEY>` | compose env confirmation; `env vars` (phase 2) | `--env-var KEY=VALUE` |
 | `build_env.<slug>.<KEY>` | frontend build env | `--build-env slug:KEY=VALUE` |
 | `dns.confirm` | the DNS confirmation as it stands today, over every record at once | `--answer dns.confirm=true` |
 | `dns.<slug>` | `wait_for` once the records are known, replacing `dns.confirm` | run again after creating the records; answered by key only where the strategy cannot verify |
@@ -195,8 +195,8 @@ Stable keys used by the interaction API. Flags map onto these, and an answers fi
 | `run.service`, `run.command` | `run` | positional |
 | `delete.confirm` | `destroy` | `--answer delete.confirm=DELETE` |
 | `update.confirm_infra_changes` | `update` | `--answer update.confirm_infra_changes=true` |
-| `dockerfile.edit`, `compose.edit` | fix editors | exit 4 headless, with the path and the validate command |
-| `config.upgrade` | first save after schema upgrade (phase 2) | `--answer config.upgrade=true` |
+| `update.confirm_compose_upgrade` | `update`, on the first render of an environment deployed before phase 2, when that render would drop something (phase 2) | `--answer update.confirm_compose_upgrade=true` |
+| `dockerfile.edit`, `compose.edit` | fix editors | exit 4 headless, with the path and the validate command || `config.upgrade` | first save after schema upgrade (phase 2) | `--answer config.upgrade=true` |
 | `recipe.input.<KEY>` | `recipe add` (phase 5) | `--input KEY=VALUE` |
 | `template.reset.confirm`, `template.adopt.confirm` | `template reset`, `template adopt` (phase 3) | `--answer template.reset.confirm=true`, `--answer template.adopt.confirm=true` |
 
@@ -252,7 +252,7 @@ directory, or a build context that never read it.
 
 - **Rewriting the CLI in JavaScript.** Ansible is pip-installed today and would become a user prerequisite; after phase 0 the UI layer is thin and its language barely matters. Revisit only if Ansible is replaced.
 - **Compose files as the recipe format.** Recipes are expressed in the `deployments.yml` schema so any strategy can render them.
-- **LLM-rendered docker-compose.** Rendering becomes deterministic in phase 2.
+- **LLM-rendered docker-compose.** Rendering becomes deterministic in phase 2. After a failed deploy the model may repair the deployed file, which releases keep deploying until the next `update` renders from the config again; how a repair survives that is left to phase 3.
 - **An LLM-free mode.** The model is part of the tool and is always configured. Steps that are pure rendering or arithmetic are deterministic for reproducibility, not to remove the model.
 - **A Kubernetes strategy.** Out of scope, but the service model and the capacity-planning hook in phase 2 are designed so one can be added without schema changes: it would implement `plan_capacity` to return node pools instead of one VM.
 
@@ -281,9 +281,9 @@ names "phase 5". Read every one of them through the left column of this table.
 
 Tracked here, resolved inside the phase that owns them.
 
-- Phase 2: whether `FULL_STACK` remains a distinct service type or becomes `BACKEND_API` with a route on `/`.
 - Phase 2: replicas under the monolithic strategy. Current answer: honoured through compose `deploy.replicas` for services without volumes; services with volumes stay at one replica.
 - Phase 4: one state bucket per cloud account versus one per environment. Current answer: per account, keyed by app slug.
 - Phase 5: policy for recipe slugs colliding with detected services. Current answer: fail with a `--slug-prefix` hint.
 - Phase 1: exact skill directories per harness at implementation time; conventions are still moving.
 - Phase 5: whether recipes may ship overlays or override files. Current answer: no, recipes use `files/` only.
+- Phase 3: how the model's repair of a failed deploy (phase 2) survives an `update`, how a fix whose cause is in `deployments.yml` is proposed, confirmed and applied there, and whether the working directory's compose file stays committed now that `release` deploys it (a checkout with an older copy would deploy that). Current answer: the repair is written to that file, which releases deploy until the next `update` renders from the config, and its notice names the field.

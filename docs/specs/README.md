@@ -42,7 +42,7 @@ Nine phases from 0.4.x to 1.4.0, planned together in the [migration plan](../not
 |------|------------|----------|
 | [Phase 0 — headless core](2026-09-04-phase-0-headless-core/) (7 parts) | – | 0.5.0, shipped |
 | [Phase 1 — harness integration](2026-09-04-phase-1-harness-integration.md) | 0 | 0.6.0 |
-| [Phase 2 — service model v2](2026-09-04-phase-2-service-model-v2.md) | 0 | 1.0.0 |
+| [Phase 2 — service model v2](2026-09-04-phase-2-service-model-v2/) (8 parts) | 0 | 1.0.0 |
 | [Phase 3 — customization layer](2026-09-04-phase-3-customization.md) | 0, 2 | 1.0.0 |
 | [Phase 4 — remote state](2026-09-04-phase-4-remote-state.md) | 0 | 1.1.0 |
 | [Phase 5 — recipes](2026-09-04-phase-5-recipes.md) | 2, 3, 4 | 1.2.0 |
