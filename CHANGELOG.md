@@ -4,6 +4,18 @@ All notable changes to Opsmith are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-10-01
+
+### Fixed
+
+- `opsmith run` no longer runs a slow command more than once on AWS. The command was held open
+  as one SSM execution. Any command that took longer than a minute hit the connection's timeout,
+  and the connection then executed it again from the start, up to three more times, while the
+  earlier runs carried on. The command now starts as a background job on the machine, and
+  Opsmith checks on it every ten seconds until it finishes. Starting the job is never retried. A
+  command may run for up to 24 hours, after which it is stopped. GCP runs the same way, so a
+  dropped IAP tunnel no longer ends the run.
+
 ## [0.6.0] - 2026-09-21
 
 Coding-harness integration, phase 1 of the

@@ -6,12 +6,24 @@
     # command_to_run: The command to run
     # ansible_user: the user on the remote machine
   tasks:
+    # Started as an async job and polled, rather than held open as one remote execution. The SSM
+    # connection gives up on an execution after ansible_aws_ssm_timeout seconds and then executes
+    # it again from the start, while the first run carries on - so a command slower than a minute
+    # ran once per attempt. Polling keeps each execution short however long the command takes,
+    # and a poll that fails is retried by ansible itself, which is safe because a poll only reads.
+    # Starting the job is the one execution that must never be replayed: if its outcome is
+    # unknown, the command may already be running, so the run fails instead.
     - name: Run docker compose run
       ansible.builtin.shell: "docker compose run --rm {{ service_name_slug }} {{ command_to_run }}"
       args:
         chdir: "/home/{{ ansible_user }}/app"
       register: command_output
       become_user: "{{ ansible_user }}"
+      vars:
+        ansible_aws_ssm_retries: 0
+      # The longest a command may run, in seconds, before ansible stops it.
+      async: 86400
+      poll: 10
       changed_when: false
       # The command's own exit status is not this playbook's failure. Opsmith exits with it, so it
       # has to come back as a value rather than as an error. A command that could not be started

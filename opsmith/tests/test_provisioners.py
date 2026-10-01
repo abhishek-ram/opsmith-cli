@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 
 from opsmith.core.errors import EXIT_CODES, AnsibleFailed, TerraformFailed
 from opsmith.core.provisioners import PACKAGE_TEMPLATES_DIR, ProvisionerFactory
@@ -235,3 +236,43 @@ def test_playbook_variables_never_reach_the_process_table(tmp_path: Path, events
     assert seen["contents"] == {"env_file_content": "SECRET=hunter2"}
     assert seen["mode"] == stat.S_IRUSR | stat.S_IWUSR
     assert not seen["path"].exists()
+
+
+def _run_task(provider: str) -> dict:
+    """
+    Reads the task that runs the user's command out of a provider's packaged run playbook.
+
+    :param provider: The template directory's provider name.
+    :return: The task, as ansible would load it.
+    """
+    playbook_path = PACKAGE_TEMPLATES_DIR / "docker_compose_run" / provider / "main.yml"
+    playbook = yaml.safe_load(playbook_path.read_text(encoding="utf-8"))
+    tasks = playbook[0]["tasks"]
+    return next(task for task in tasks if task["name"] == "Run docker compose run")
+
+
+@pytest.mark.parametrize("provider", ["aws", "gcp"])
+def test_a_run_command_is_polled_rather_than_held_open(provider: str):
+    """
+    The run playbook starts the command as an async job and polls it.
+
+    Held open as one execution, a command slower than the SSM connection's timeout was given up
+    on and executed again while the first run carried on, so it ran once per attempt. The
+    ceiling has to be long enough for a real one-off job, not a connection timeout.
+    """
+    task = _run_task(provider)
+
+    assert task["async"] >= 3600
+    assert task["poll"] > 0
+
+
+def test_starting_a_run_command_on_aws_is_never_retried():
+    """
+    The SSM connection's own retries are switched off for the task that starts the command.
+
+    A retry there re-executes the command when the first attempt's outcome is unknown, and it
+    may already be running. The polls that follow are retried by ansible's async loop instead.
+    """
+    task = _run_task("aws")
+
+    assert task["vars"]["ansible_aws_ssm_retries"] == 0

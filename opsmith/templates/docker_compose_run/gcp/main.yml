@@ -6,12 +6,19 @@
     # command_to_run: The command to run
     # ansible_user: the user on the remote machine
   tasks:
+    # Started as an async job and polled, rather than held open as one remote execution through
+    # an IAP tunnel for as long as the command takes. A tunnel that drops while a poll is in
+    # flight costs that poll, which ansible retries; it does not cost the command, which carries
+    # on. The ssh connection does not replay an execution, so nothing here can start it twice.
     - name: Run docker compose run
       ansible.builtin.shell: "docker compose run --rm {{ service_name_slug }} {{ command_to_run }}"
       args:
         chdir: "/home/{{ ansible_user }}/app"
       register: command_output
       become_user: "{{ ansible_user }}"
+      # The longest a command may run, in seconds, before ansible stops it.
+      async: 86400
+      poll: 10
       changed_when: false
       # The command's own exit status is not this playbook's failure. Opsmith exits with it, so it
       # has to come back as a value rather than as an error. A command that could not be started
