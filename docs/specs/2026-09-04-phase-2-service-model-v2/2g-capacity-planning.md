@@ -101,11 +101,11 @@ Monolithic implementation of `plan_capacity`:
 4. The smallest machine type by RAM then CPU that satisfies both; the next two larger are `alternatives`.
 5. `availability: high` goes into `unsupported` with the advice to choose a multi-node strategy when one exists. A plan that fits no available machine type fails with `CAPACITY_UNSATISFIABLE` before any infrastructure is created.
 
-The image-platform rule: build sources are built for both platforms already, and the VM architecture is arm64 only if every image source lists `linux/arm64`.
+The image-platform rule: build sources are built for the planned architecture alone, so they constrain nothing, and the VM architecture is arm64 only if every image source lists `linux/arm64`.
 
 A Kubernetes strategy would implement the same hook differently: a system pool with a fixed overhead, application pools bin-packed from replicas × per-replica requests with headroom, at least three nodes per pool for `availability: high`, and one `MachinePlan` per pool. Neither the config nor the estimate changes.
 
-**Re-planning.** `update` re-runs the estimate when services, infra instances or the workload profile changed, and shows the difference against the stored plan. For monolithic, a changed instance type is applied only through `env resize --env NAME [--instance-type T]`, a Terraform apply of the new type with a stop and start of the VM, never implicitly.
+**Re-planning.** `update` re-runs the estimate when services, infra instances or the workload profile changed, and shows the difference against the stored plan. For monolithic, a changed instance type is applied only through `env resize --env NAME [--instance-type T]`, a Terraform apply of the new type with a stop and start of the VM, never implicitly. Because build sources are built for one architecture, a resize to a type of the other architecture has to rebuild and re-release them as part of the resize.
 
 ### Where it runs
 

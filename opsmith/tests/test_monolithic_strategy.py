@@ -101,8 +101,8 @@ class FakeCloudProvider(BaseCloudProvider):
         return FakeCloudDetail(region="us-test-1")
 
     def get_instance_types(self) -> MachineTypeList:
-        """Returns two machine types, so selection has something to choose between."""
-        return MachineTypeList(machines=[SMALL_MACHINE, LARGE_MACHINE])
+        """Returns machine types of both architectures, so selection has something to choose."""
+        return MachineTypeList(machines=[SMALL_MACHINE, LARGE_MACHINE, X86_MACHINE])
 
 
 SMALL_MACHINE = MachineType(
@@ -114,6 +114,11 @@ LARGE_MACHINE = MachineType(
     ram_gb=4.0,
     architecture=CpuArchitectureEnum.ARM64,
     is_recommended=True,
+)
+#: Offered only by tests that call ``_offer_an_x86_machine``, so the model's usual suggestion
+#: stays the two ARM machines above.
+X86_MACHINE = MachineType(
+    name="t3.medium", cpu=2, ram_gb=4.0, architecture=CpuArchitectureEnum.X86_64
 )
 
 
@@ -359,7 +364,8 @@ def test_deploy_passes_the_expected_ansible_extra_vars(
 ):
     """
     The three playbooks a deploy runs each get the variables their templates read: where the
-    build context is, how to reach the VM, and what to write into the compose stack's .env.
+    build context is and which platform to build for, how to reach the VM, and what to write into
+    the compose stack's .env.
     """
     strategy.deploy(deployment_config, environment)
 
@@ -370,6 +376,7 @@ def test_deploy_passes_the_expected_ansible_extra_vars(
         "image_name_slug": SERVICE_SLUG,
         "image_tag_name": "latest",
         "registry_url": REGISTRY_URL,
+        "platform": "linux/arm64",
         "region": "us-test-1",
     }
 
@@ -418,6 +425,78 @@ def test_deploy_asks_for_a_template_per_step(
         "docker_compose_deploy",
     ]
     assert {call["provider"] for call in copies} == {"FAKE"}
+
+
+def _offer_an_x86_machine(agent: MagicMock):
+    """
+    Has the model suggest the x86_64 machine beside the two ARM ones, so a test can choose a
+    machine of either architecture. Every other request is answered as the fixture answers it.
+
+    :param agent: The fake model from the ``agent`` fixture.
+    """
+    answer_by_shape = agent.run_sync.side_effect
+
+    def run_sync(prompt, output_type=None, **kwargs):
+        if output_type is not MachineTypeList:
+            return answer_by_shape(prompt, output_type=output_type, **kwargs)
+        response = MagicMock()
+        response.output = MachineTypeList(machines=[SMALL_MACHINE, LARGE_MACHINE, X86_MACHINE])
+        response.new_messages.return_value = []
+        return response
+
+    agent.run_sync.side_effect = run_sync
+
+
+@pytest.mark.parametrize(
+    "machine, platform",
+    [(LARGE_MACHINE, "linux/arm64"), (X86_MACHINE, "linux/amd64")],
+    ids=["arm64", "x86_64"],
+)
+def test_images_are_built_for_the_machine_the_deploy_chose(
+    strategy,
+    deployment_config,
+    environment,
+    provisioners,
+    agent,
+    interact,
+    machine: MachineType,
+    platform: str,
+):
+    """
+    The machine is chosen before anything is built, and the images are built for its
+    architecture alone - whichever of the two the user picked - so the machine created and the
+    images it pulls always agree.
+    """
+    _offer_an_x86_machine(agent)
+    interact.answers["env.instance_type"] = machine
+
+    strategy.deploy(deployment_config, environment)
+
+    build = provisioners.find("run_playbook", SERVICE_SLUG)
+    assert build["extra_vars"]["platform"] == platform
+    virtual_machine = provisioners.find("apply", "virtual_machine")
+    assert virtual_machine["variables"]["instance_arch"] == machine.architecture.value
+
+
+def test_a_failed_build_stops_the_deploy_before_any_machine_exists(
+    strategy, deployment_config, environment, provisioners, interact
+):
+    """
+    Choosing the machine first must not mean creating it first. A build that fails stops the
+    deploy after the instance type was asked and before any machine was created, just as it did
+    when the build came before the choice.
+    """
+    provisioners.ansible_failures[SERVICE_SLUG] = AnsibleFailed(
+        "Ansible command failed with exit code 2.",
+        details={"command": "ansible-playbook main.yml", "output_tail": "ERROR: failed to build"},
+    )
+
+    with pytest.raises(AnsibleFailed):
+        strategy.deploy(deployment_config, environment)
+
+    assert [entry["key"] for entry in interact.asked] == ["env.instance_type"]
+    assert f"ansible:run_playbook:{SERVICE_SLUG}" in provisioners.actions()
+    assert "terraform:apply:virtual_machine" not in provisioners.actions()
 
 
 def test_deploy_saves_the_state_and_the_config_snapshot(
@@ -481,6 +560,33 @@ def test_release_reuses_the_machine_and_redeploys(
         "/home/ubuntu/app/.env",
         "/home/ubuntu/app/docker-compose.yml",
     ]
+
+
+def test_release_and_update_build_for_the_machine_the_environment_has(
+    strategy, deployment_config, environment, provisioners, agent, interact
+):
+    """
+    Once an environment exists, its machine's architecture is in the state file and nothing
+    changes it, so a release and an update both build for that one platform. The machine here is
+    x86_64 while the model recommends an ARM one, so a build that looked anywhere but the state
+    would show.
+    """
+    _offer_an_x86_machine(agent)
+    interact.answers["env.instance_type"] = X86_MACHINE
+    strategy.deploy(deployment_config, environment)
+
+    provisioners.calls.clear()
+    strategy.release(deployment_config, environment)
+    release_build = provisioners.find("run_playbook", SERVICE_SLUG)
+
+    provisioners.calls.clear()
+    deployment_config.services[0].service_port = 8080
+    result = strategy.update(deployment_config, environment)
+    update_build = provisioners.find("run_playbook", SERVICE_SLUG)
+
+    assert result.applied is True
+    assert release_build["extra_vars"]["platform"] == "linux/amd64"
+    assert update_build["extra_vars"]["platform"] == "linux/amd64"
 
 
 def test_destroy_tears_down_the_machine_and_the_last_registry(

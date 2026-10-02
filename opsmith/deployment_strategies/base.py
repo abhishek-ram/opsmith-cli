@@ -11,7 +11,11 @@ from typing import Dict, List, Optional, Type
 from pydantic_ai import Agent
 
 from opsmith.agent import AgentDeps
-from opsmith.cloud_providers.base import BaseCloudProvider, MachineType
+from opsmith.cloud_providers.base import (
+    BaseCloudProvider,
+    CpuArchitectureEnum,
+    MachineType,
+)
 from opsmith.core.context import OpsmithContext
 from opsmith.core.errors import AnsibleFailed, InvalidArgument, TerraformFailed
 from opsmith.core.events import (
@@ -274,9 +278,25 @@ class BaseDeploymentStrategy(abc.ABC):
         deployment_config: DeploymentConfig,
         environment: DeploymentEnvironment,
         registry_url: str,
+        architecture: CpuArchitectureEnum,
     ) -> Dict[str, str]:
-        """Builds and pushes Docker images for each service."""
-        self.events.step(STEP_BUILD, "Build and push container images to the registry")
+        """
+        Builds each service's image for one architecture and pushes it to the registry.
+
+        Only the architecture the images will run on is built. Building for any other one costs a
+        second build per image, and one of the two always runs under emulation, whatever the
+        host is.
+
+        :param deployment_config: What the repository deploys.
+        :param environment: The environment the images are built for.
+        :param registry_url: The registry to push them to.
+        :param architecture: The architecture of the machine that will run them.
+        :return: The pushed image's URL, by service slug.
+        """
+        docker_platform = architecture.docker_platform
+        self.events.step(
+            STEP_BUILD, "Build and push container images to the registry", platform=docker_platform
+        )
         self._report_uncommitted_changes(environment)
 
         images = {}
@@ -310,7 +330,11 @@ class BaseDeploymentStrategy(abc.ABC):
 
                 image_name_slug = service_dir_slug
 
-                self.events.step(STEP_BUILD, f"Building and pushing image for {image_name_slug}...")
+                self.events.step(
+                    STEP_BUILD,
+                    f"Building and pushing image for {image_name_slug} ({docker_platform})...",
+                    platform=docker_platform,
+                )
 
                 build_infra_path = (
                     self.deployments_path
@@ -330,6 +354,7 @@ class BaseDeploymentStrategy(abc.ABC):
                     "image_name_slug": image_name_slug,
                     "image_tag_name": "latest",
                     "registry_url": registry_url,
+                    "platform": docker_platform,
                 }
                 extra_vars.update(environment.cloud_provider_instance.provider_detail_dump)
                 ansible_runner.copy_template("docker_build_push", provider_name)

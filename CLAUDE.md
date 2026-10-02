@@ -182,10 +182,16 @@ one key; a headless run stopping there is told to use `opsmith env create`.
 `BaseDeploymentStrategy` (`opsmith/deployment_strategies/base.py`) holds the steps every strategy
 shares — container registry, image build and push, VM creation, fetching remote files, bucket
 cleanup — and `MonolithicDeploymentStrategy` composes them into `deploy`/`release`/`update`/`run`/
-`destroy`. A monolithic deploy is: container registry (Terraform) → build and push each image
-(Ansible) → select and create a VM (LLM + Terraform) → install Docker (Ansible) → confirm DNS →
-generate and deploy the compose stack (LLM + Ansible), with the state written to
-`.opsmith/environments/<env>/state.yml`.
+`destroy`. A monolithic deploy is: select a VM type (LLM) → container registry (Terraform) →
+build and push each image for that type's architecture (Ansible) → create the VM (Terraform) →
+install Docker (Ansible) → confirm DNS → generate and deploy the compose stack (LLM + Ansible),
+with the state written to `.opsmith/environments/<env>/state.yml`.
+
+Images are built for one platform: the chosen type's on a deploy, and on a release or update the
+machine's, from `state.yml`. The build runs on a buildx builder named `opsmith`, passed with
+`--builder` and never `--use`d or removed, so the user's default builder is left alone and the
+cache carries across images and runs. It is a `docker-container` builder because BuildKit ships
+QEMU, which is what lets a host build for a machine of the other architecture with no setup.
 
 A strategy implements six methods, all of which return a result: `deploy`, `release`, `update`,
 `run`, `destroy` and `status`. `status` reads the environment's own `state.yml` and must not
@@ -262,8 +268,9 @@ was built. Parts `0a` (CLI split and errors), `0b` (context, events, provisioner
 `0c` (model configuration, tool checks, the `config` commands), `0d` (the interaction API and its
 terminal implementation), `0e` (headless mode, the answer store, resume), `0f` (the headless
 subcommands and typed results) and `0g` (provider questions and `env plan`) have all landed.
-**Phase 0 is complete and shipped as 0.5.0, and phase 1 as 0.6.0.** Phase 2 (service model v2
-and deterministic rendering) is next.
+**Phase 0 is complete and shipped as 0.5.0, and phase 1 as 0.6.0.** 0.7.0 is no phase: it builds
+images for the machine's architecture only. Phase 2 (service model v2 and deterministic
+rendering) is next, and ships as 1.0.0 with phase 3.
 
 **The phases were renumbered on 2026-09-20**, when harness integration moved from last to first:
 old 6 became 1, and old 1 to 5 each moved up one. Phase 0, 7 and 8 kept their numbers. Everything

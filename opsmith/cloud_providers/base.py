@@ -30,6 +30,19 @@ class CpuArchitectureEnum(str, Enum):
     ARM64 = "arm64"
     X86_64 = "x86_64"
 
+    @property
+    def docker_platform(self) -> str:
+        """
+        The platform Docker builds and pulls images for on a machine of this architecture.
+
+        Docker names x86_64 ``amd64``, so the value cannot be used as it is.
+
+        :return: The platform, such as ``linux/arm64``.
+        """
+        if self is CpuArchitectureEnum.ARM64:
+            return "linux/arm64"
+        return "linux/amd64"
+
 
 class MachineType(BaseModel):
     """Describes a machine type."""
