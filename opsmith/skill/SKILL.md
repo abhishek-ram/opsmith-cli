@@ -5,7 +5,7 @@ license: GPL-3.0-only
 compatibility: Requires the opsmith CLI, docker, terraform >= 1.10 and cloud credentials
 allowed-tools: Bash(opsmith:*)
 metadata:
-  version: "0.6.1"
+  version: "0.7.0"
 ---
 
 # Opsmith

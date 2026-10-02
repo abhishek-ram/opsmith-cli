@@ -4,6 +4,36 @@ All notable changes to Opsmith are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-10-02
+
+Faster image builds. This release carries no phase of the
+[migration to 1.0](docs/notes/2026-09-04-migration-plan.md); phases 2 and 3 ship together as
+1.0.0.
+
+### Changed
+
+- **Images are built only for the machine that runs them, and the build cache is kept.** Every
+  image used to be built for both `linux/amd64` and `linux/arm64`, and the builder was removed
+  after each image along with its cache. So every build started cold, and one of the two
+  architectures always ran under emulation. `env create` now asks for the instance type before
+  it builds, and builds for that type's architecture. `release` and `update` build for the
+  architecture of the machine recorded in `state.yml`. Builds run on a buildx builder named
+  `opsmith`, which is kept between runs; `docker buildx rm opsmith` reclaims its cache. Images
+  already in your registry carry both architectures and keep working until the next release
+  replaces them.
+- **Breaking, for third-party deployment strategies.**
+  `BaseDeploymentStrategy._build_and_push_images` takes the architecture to build for, a
+  `CpuArchitectureEnum`, and `CpuArchitectureEnum.docker_platform` gives the platform Docker
+  names it by. There are no known third-party strategies; this is acceptable before 1.0.
+
+### Fixed
+
+- Opsmith no longer changes your default buildx builder. The build used to select its own
+  builder with `--use` and remove it afterwards, so a build that failed skipped the removal and
+  left a builder named `multiarch-builder` as your default. If `docker buildx ls` marks it with
+  `*`, `docker buildx rm multiarch-builder` removes it, and buildx falls back to the Docker
+  context's default builder.
+
 ## [0.6.1] - 2026-10-01
 
 ### Fixed

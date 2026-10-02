@@ -10,16 +10,24 @@
     # image_name_slug: "my-service"
     # registry_url: "registry.com/my-repo"
     # image_tag_name: "latest"
+    # platform: "linux/amd64"
     # region: "us-east-1"
     image_name: "{{ registry_url }}"
     image_tag: "{{ image_name_slug }}-{{ image_tag_name }}"
     registry_host: "{{ registry_url.split('/')[0] }}"
+    # Opsmith's own builder. It is named on each build rather than selected with --use, so the
+    # user's default builder never changes, and it is never removed, so its cache carries across
+    # images and runs. The docker-container driver bundles QEMU, which is what lets a host build
+    # for a machine of the other architecture without any setup.
+    builder_name: "opsmith"
 
   tasks:
-    - name: Setup Docker Buildx
+    # The last inspect covers a concurrent run that created the builder first.
+    - name: Ensure the Opsmith buildx builder exists
       shell: |
-        docker buildx create --use --name multiarch-builder || docker buildx use multiarch-builder
-      ignore_errors: yes
+        docker buildx inspect {{ builder_name }} >/dev/null 2>&1 \
+          || docker buildx create --name {{ builder_name }} --driver docker-container >/dev/null \
+          || docker buildx inspect {{ builder_name }} >/dev/null
 
     - name: "Login to AWS ECR"
       block:
@@ -39,12 +47,13 @@
           fail:
             msg: "Failed to login to AWS ECR. Please check your credentials."
 
-    - name: Build and push multi-platform image
+    - name: Build and push the image for the machine's platform
       block:
       - name: Build and push Docker image
         shell: |
           docker buildx build \
-            --platform linux/amd64,linux/arm64 \
+            --builder {{ builder_name }} \
+            --platform {{ platform }} \
             --file {{ dockerfile_path }} \
             --tag {{ image_name }}:{{ image_tag }} \
             --push \
@@ -63,10 +72,6 @@
         community.docker.docker_login:
           registry_url: "{{ registry_host }}"
           state: absent
-
-      - name: Remove buildx builder
-        shell: "docker buildx rm multiarch-builder"
-        ignore_errors: yes
 
     - name: Print image URL
       debug:

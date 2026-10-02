@@ -1168,10 +1168,10 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
     ) -> EnvCreateResult:
         """
         Creates a monolithic deployment environment using the provided deployment configuration and
-        environment details. This function includes steps for setting up a container registry,
-        building and pushing images, estimating resource requirements, selecting cloud provider
-        instance types, creating a virtual machine, and generating Docker Compose configurations
-        for deployment.
+        environment details. This function includes steps for estimating resource requirements,
+        selecting a cloud provider instance type, setting up a container registry, building and
+        pushing images for that instance type's architecture, creating a virtual machine, and
+        generating Docker Compose configurations for deployment.
 
         :param deployment_config: Configuration object containing details of services, infrastructure
             dependencies, and other deployment settings.
@@ -1206,16 +1206,9 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
             original_services = deployment_config.services
             deployment_config.services = other_services
 
-            self.events.step(
-                STEP_REGISTRY,
-                (
-                    "Setting up container registry for region"
-                    f" '{environment.cloud_provider_detail.region}'..."
-                ),
-            )
-            registry_url = self._setup_container_registry(deployment_config, environment)
-            images = self._build_and_push_images(deployment_config, environment, registry_url)
-
+            # The machine is chosen before anything is built, because its architecture is the one
+            # the images are built for. Choosing creates nothing, so a build that fails still
+            # leaves no machine behind.
             self.events.step(STEP_VM, f"Selecting instance type on {cloud_provider.name()}...")
             selected_machine_type = self._select_virtual_machine_type(
                 deployment_config, cloud_provider
@@ -1228,6 +1221,18 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
                 f"Selected instance type: {instance_type} ({instance_arch.value})",
                 instance_type=instance_type,
                 architecture=instance_arch.value,
+            )
+
+            self.events.step(
+                STEP_REGISTRY,
+                (
+                    "Setting up container registry for region"
+                    f" '{environment.cloud_provider_detail.region}'..."
+                ),
+            )
+            registry_url = self._setup_container_registry(deployment_config, environment)
+            images = self._build_and_push_images(
+                deployment_config, environment, registry_url, instance_arch
             )
 
             self.events.step(STEP_VM, "Creating new virtual machine for monolithic deployment...")
@@ -1340,7 +1345,10 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
         if other_services:
             if env_state.virtual_machine:
                 images = self._build_and_push_images(
-                    deployment_config, environment, env_state.require_registry_url()
+                    deployment_config,
+                    environment,
+                    env_state.require_registry_url(),
+                    env_state.virtual_machine.architecture,
                 )
 
                 ansible_user = env_state.virtual_machine.user
@@ -1835,9 +1843,12 @@ class MonolithicDeploymentStrategy(BaseDeploymentStrategy):
 
             self.events.step(STEP_COMPOSE, "Updating backend services...")
 
-            # Rebuild and push images
+            # Rebuild and push images, for the machine the environment already runs on
             images = self._build_and_push_images(
-                deployment_config, environment, env_state.require_registry_url()
+                deployment_config,
+                environment,
+                env_state.require_registry_url(),
+                env_state.virtual_machine.architecture,
             )
 
             # Fetch existing .env file
