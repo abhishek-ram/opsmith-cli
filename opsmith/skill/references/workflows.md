@@ -73,8 +73,14 @@ least once:
 opsmith release --env dev
 ```
 
-Builds the current working tree into images, pushes them, and restarts the stack. A `FRONTEND`
-service is built locally first, so the machine running this needs that toolchain installed.
+Builds the last commit into images, pushes them, and restarts the stack. **Only committed code is
+deployed**: the images are built from `HEAD`, so an uncommitted edit is not in them and neither is
+a file git does not track. Commit first. When the tree has uncommitted changes the release still
+runs, and `result.notices` names what it left out.
+
+Two things are read from the working tree as it stands, committed or not: each service's
+`.opsmith/docker/<service>/Dockerfile`, and a `FRONTEND` service, which is built in place on this
+machine - so the machine running this needs that toolchain installed.
 
 ## After changing deployments.yml
 

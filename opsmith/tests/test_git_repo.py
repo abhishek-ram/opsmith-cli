@@ -142,3 +142,89 @@ def test_a_git_that_cannot_be_run_is_reported_rather_than_crashing(tmp_project: 
         repo.get_git_tracked_files(["."])
 
     assert "could not be run" in raised.value.message
+
+
+def _commit_everything(tmp_project: Path, message: str = "commit") -> None:
+    """
+    Stages every file in the project and commits it, with an identity given here rather than read
+    from the machine's git configuration, which a CI runner may not have.
+    """
+    repo = git.Repo(str(tmp_project))
+    repo.git.add("--all")
+    actor = git.Actor("Opsmith Test", "test@opsmith.invalid")
+    repo.index.commit(message, author=actor, committer=actor)
+
+
+def test_a_clean_tree_has_no_uncommitted_changes(tmp_project: Path):
+    """A repository whose working tree matches its last commit reports nothing."""
+    (tmp_project / "app.py").write_text("print('v1')\n")
+    _commit_everything(tmp_project)
+
+    assert GitRepo(tmp_project).uncommitted_changes() == []
+
+
+def test_uncommitted_changes_lists_every_kind_of_change(tmp_project: Path):
+    """
+    A modified file, a staged new file and an untracked file are all left out of a build taken
+    from HEAD, so all three are reported, by their path from the repository root.
+    """
+    (tmp_project / "app.py").write_text("print('v1')\n")
+    _commit_everything(tmp_project)
+
+    (tmp_project / "app.py").write_text("print('v2')\n")
+    (tmp_project / "staged.py").write_text("print('staged')\n")
+    git.Repo(str(tmp_project)).git.add("staged.py")
+    (tmp_project / "untracked.py").write_text("print('untracked')\n")
+
+    changed = GitRepo(tmp_project).uncommitted_changes()
+
+    assert sorted(changed) == ["app.py", "staged.py", "untracked.py"]
+
+
+def test_a_rename_is_reported_once_by_its_new_path(tmp_project: Path):
+    """
+    With -z, git follows a rename with the path it came from as an entry of its own. That entry is
+    not a change, and reading it as one would report a file that no longer exists.
+    """
+    (tmp_project / "old_name.py").write_text("print('renamed')\n")
+    _commit_everything(tmp_project)
+
+    git.Repo(str(tmp_project)).git.mv("old_name.py", "new_name.py")
+
+    assert GitRepo(tmp_project).uncommitted_changes() == ["new_name.py"]
+
+
+def test_changes_under_the_excluded_directory_are_not_reported(tmp_project: Path):
+    """
+    Opsmith writes under .opsmith/ on every run, so a build that asked about it would report its own
+    working directories. Excluding it leaves only the changes that matter to the images.
+    """
+    (tmp_project / "app.py").write_text("print('v1')\n")
+    (tmp_project / ".opsmith" / "deployments.yml").write_text("app_name: test\n")
+    _commit_everything(tmp_project)
+
+    (tmp_project / ".opsmith" / "deployments.yml").write_text("app_name: changed\n")
+    (tmp_project / ".opsmith" / "environments").mkdir()
+    (tmp_project / ".opsmith" / "environments" / "state.yml").write_text("{}\n")
+    (tmp_project / "app.py").write_text("print('v2')\n")
+
+    changed = GitRepo(tmp_project).uncommitted_changes(excluding=tmp_project / ".opsmith")
+
+    assert changed == ["app.py"]
+
+
+def test_the_build_context_is_the_last_commit_not_the_working_tree(tmp_project: Path):
+    """
+    The archive a build runs in is taken from HEAD: an uncommitted edit is not in it and neither
+    is an untracked file. This is the behaviour the skill tells an agent about, and the reason
+    uncommitted changes are reported at all.
+    """
+    (tmp_project / "app.py").write_text("print('v1')\n")
+    _commit_everything(tmp_project)
+
+    (tmp_project / "app.py").write_text("print('v2')\n")
+    (tmp_project / "untracked.py").write_text("print('untracked')\n")
+
+    with GitRepo(tmp_project).git_archive_context() as context_path:
+        assert (context_path / "app.py").read_text() == "print('v1')\n"
+        assert not (context_path / "untracked.py").exists()

@@ -241,7 +241,7 @@ opsmith env status --env dev              # what one of them is running
 opsmith env create --name dev --provider AWS --region us-east-1 --strategy Monolithic \
   --domain api=api.example.com --domain-email me@example.com
 
-opsmith release --env dev                 # build the current code and deploy it
+opsmith release --env dev                 # build the last commit and deploy it
 opsmith update  --env dev                 # reconcile a deployed environment with the config
 opsmith run     --env dev --service api -- ls -la
 opsmith --answer delete.confirm=DELETE destroy --env dev
