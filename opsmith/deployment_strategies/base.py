@@ -43,6 +43,10 @@ from opsmith.types import (
 )
 from opsmith.utils import slugify
 
+#: How many uncommitted paths a build's notice names before it summarises the rest as a count.
+#: The notice's details carry every one of them.
+UNCOMMITTED_CHANGES_SHOWN = 5
+
 
 class DeploymentStrategyRegistry:
     """A singleton registry for deployment strategies."""
@@ -234,6 +238,41 @@ class BaseDeploymentStrategy(abc.ABC):
         self.events.log(STEP_REGISTRY, f"Container registry created. URL: {registry_url}")
         return registry_url
 
+    def _report_uncommitted_changes(self, environment: DeploymentEnvironment):
+        """
+        Tells the user when the working tree holds changes the images being built will not contain.
+
+        Images are built from the last commit, not from the working tree, so an edit that has not
+        been committed is not deployed - and a release that succeeds while running the old code is
+        the confusing outcome this exists to prevent. It is a notice rather than a refusal: building
+        the last commit is the intended behaviour, and releasing it with other work in progress is
+        ordinary. ``.opsmith/`` is left out because Opsmith writes there itself on every run, and
+        the Dockerfiles under it are read from the working tree anyway.
+
+        :param environment: The environment being built for, named in the suggested next step.
+        """
+        changed = self.git_repo.uncommitted_changes(excluding=self.deployments_path)
+        if not changed:
+            return
+
+        shown = ", ".join(changed[:UNCOMMITTED_CHANGES_SHOWN])
+        if len(changed) > UNCOMMITTED_CHANGES_SHOWN:
+            shown += f" and {len(changed) - UNCOMMITTED_CHANGES_SHOWN} more"
+
+        self.interact.notify(
+            (
+                "Images are built from the last commit, so uncommitted changes are not deployed:"
+                f" {shown}."
+            ),
+            details={
+                "uncommitted": changed,
+                "next_steps": [
+                    "Commit the changes, then run"
+                    f" 'opsmith release --env {environment.name}' to deploy them."
+                ],
+            },
+        )
+
     def _build_and_push_images(
         self,
         deployment_config: DeploymentConfig,
@@ -258,6 +297,7 @@ class BaseDeploymentStrategy(abc.ABC):
         self.events.step(
             STEP_BUILD, "Build and push container images to the registry", platform=docker_platform
         )
+        self._report_uncommitted_changes(environment)
 
         images = {}
 

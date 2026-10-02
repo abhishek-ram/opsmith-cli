@@ -278,11 +278,16 @@ def hint_of(error: OpsmithError) -> str:
 class FakeGitRepo:
     """A git repository that needs no repository on disk."""
 
-    def __init__(self, archive_path: Optional[Path] = None):
+    def __init__(
+        self, archive_path: Optional[Path] = None, uncommitted: Optional[List[str]] = None
+    ):
         """
         :param archive_path: What ``git_archive_context`` yields as the clean build context.
+        :param uncommitted: What ``uncommitted_changes`` reports. A clean tree by default.
         """
         self.archive_path = archive_path if archive_path is not None else Path("/fake/archive")
+        self.uncommitted = uncommitted if uncommitted is not None else []
+        self.uncommitted_excluding: List[Optional[Path]] = []
         self.ensure_gitignore_calls = 0
 
     def get_git_tracked_files(self, src_dirs: List[str]) -> List[Path]:
@@ -293,6 +298,11 @@ class FakeGitRepo:
     def git_archive_context(self):
         """Yields the fixed archive path instead of exporting a real repository."""
         yield self.archive_path
+
+    def uncommitted_changes(self, excluding: Optional[Path] = None) -> List[str]:
+        """Reports the scripted changes, and records what the caller asked to leave out."""
+        self.uncommitted_excluding.append(excluding)
+        return list(self.uncommitted)
 
     def ensure_gitignore(self):
         """Records that the caller asked for the opsmith ignore block."""

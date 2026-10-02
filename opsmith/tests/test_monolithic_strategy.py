@@ -1124,6 +1124,50 @@ def test_release_returns_what_it_built_and_whether_it_came_up(
     assert result.urls == {SERVICE_SLUG: "https://api.example.test"}
 
 
+def test_a_release_with_uncommitted_changes_says_they_are_not_deployed(
+    strategy, deployment_config, environment, interact: FakeInteraction, tmp_path: Path
+):
+    """
+    Images are built from the last commit, so a release from a tree with uncommitted edits
+    succeeds while deploying none of them. The release still runs, and leaves a notice naming the
+    changes and a next step to commit them - which is what a harness reading the result sees. The
+    repository is asked to leave .opsmith/ out, since the run itself writes there.
+    """
+    strategy.deploy(deployment_config, environment)
+    strategy.git_repo.uncommitted = ["app.py", "untracked.py"]
+    interact.notices.clear()
+    interact.next_steps.clear()
+
+    result = strategy.release(deployment_config, environment)
+
+    assert result.images == {SERVICE_SLUG: IMAGE_URL}
+    uncommitted_details = [
+        notice.details
+        for notice in interact.notices
+        if isinstance(notice.details, dict) and "uncommitted" in notice.details
+    ]
+    assert len(uncommitted_details) == 1
+    assert uncommitted_details[0]["uncommitted"] == ["app.py", "untracked.py"]
+    assert interact.next_steps == [
+        "Commit the changes, then run 'opsmith release --env prod' to deploy them."
+    ]
+    assert strategy.git_repo.uncommitted_excluding[-1] == tmp_path / ".opsmith"
+
+
+def test_a_release_from_a_clean_tree_says_nothing_about_commits(
+    strategy, deployment_config, environment, interact: FakeInteraction
+):
+    """A tree that matches its last commit is what a release is meant to build, so no notice."""
+    strategy.deploy(deployment_config, environment)
+
+    strategy.release(deployment_config, environment)
+
+    assert not any(
+        isinstance(notice.details, dict) and "uncommitted" in notice.details
+        for notice in interact.notices
+    )
+
+
 def test_update_with_nothing_to_change_says_so_rather_than_failing(
     strategy, deployment_config, environment
 ):

@@ -62,12 +62,20 @@ opsmith --output json env plan --name dev --provider AWS --strategy Monolithic
 opsmith --output json env create --name dev --provider AWS --region us-east-1 \
   --strategy Monolithic --domain api=api.example.com --domain-email you@example.com
 
-# 4. Build the current code and deploy it.
+# 4. Build the last commit and deploy it.
 opsmith --output json release --env dev
 
 # 5. What is it running?
 opsmith --output json env status --env dev
 ```
+
+**Only committed code is deployed.** Every command that builds images - `env create`, `release`
+and `update` - builds them from the last commit, not the working tree, so an edit that is not
+committed is not deployed and a file git does not track is not in the image. The run still
+succeeds, and says what it left out in `result.notices`. If you changed code for this deployment,
+commit it first; if you may not commit, tell the user their change will not go out until it is.
+Each service's Dockerfile and a `FRONTEND` build are the exceptions: both are read from the
+working tree as it stands.
 
 Then, as the work continues:
 
