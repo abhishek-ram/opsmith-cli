@@ -4,6 +4,25 @@ All notable changes to Opsmith are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-10-02
+
+### Added
+
+- A build that leaves changes out now says so. Container images are built from the last commit,
+  so an uncommitted edit is not deployed and a file git does not track is not in the image. When
+  `env create`, `release` or `update` builds images from a working tree with uncommitted changes
+  outside `.opsmith/`, the result's `notices` name them, with a next step to commit them and
+  release again. The run itself goes ahead as before.
+
+### Fixed
+
+- The Agent Skill said `release` builds the current working tree. It builds the last commit, so an
+  agent could change code, release, get `ok: true` and still be running the old code. The skill,
+  its release workflow and the README now say that only committed code is deployed, and the skill
+  tells an agent to commit first, or to tell the user the change will not go out until it is
+  committed. A service's Dockerfile and a `FRONTEND` build are the exceptions, and are read from
+  the working tree as it stands.
+
 ## [0.6.1] - 2026-10-01
 
 ### Fixed

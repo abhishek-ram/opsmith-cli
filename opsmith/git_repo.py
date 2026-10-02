@@ -46,6 +46,8 @@ class Repository(Protocol):
 
     def git_archive_context(self) -> ContextManager[Path]: ...
 
+    def uncommitted_changes(self, excluding: Optional[Path] = None) -> List[str]: ...
+
     def ensure_gitignore(self): ...
 
 
@@ -136,10 +138,57 @@ class GitRepo:
         absolute_paths = [git_root / p for p in relative_paths if p]
         return absolute_paths
 
+    def uncommitted_changes(self, excluding: Optional[Path] = None) -> List[str]:
+        """
+        Lists what in the working tree differs from the last commit: modified, staged, deleted and
+        untracked files, with ``.gitignore`` respected.
+
+        This is exactly what :meth:`git_archive_context` leaves out, since the archive is taken
+        from HEAD, which is why a build asks for it before it starts.
+
+        :param excluding: A directory inside the repository whose changes the caller does not care
+            about, such as ``.opsmith/``, which Opsmith writes to on every run. A directory outside
+            the repository excludes nothing.
+        :return: Paths relative to the repository root, in the order git reports them. An untracked
+            directory is one entry, ending in a slash.
+        """
+        git_root = Path(self.repo.working_dir).resolve()
+        status_args = ["--porcelain=v1", "-z", "--", "."]
+        if excluding is not None and excluding.resolve().is_relative_to(git_root):
+            excluded = excluding.resolve().relative_to(git_root)
+            status_args.append(f":(exclude){excluded.as_posix()}")
+
+        with self._reporting_a_missing_git():
+            status_output = self.repo.git.status(*status_args)
+
+        # With -z every entry is "XY path", NUL-terminated, and nothing is quoted. A rename or a
+        # copy is the one exception: it is followed by the path it came from, as an entry of its
+        # own, which is not a change in its own right and is skipped.
+        entries = status_output.split("\0")
+        changed: List[str] = []
+        index = 0
+        while index < len(entries):
+            entry = entries[index]
+            index += 1
+            if not entry:
+                continue
+
+            status_code = entry[:2]
+            changed.append(entry[3:])
+            if "R" in status_code or "C" in status_code:
+                index += 1
+
+        return changed
+
     @contextmanager
     def git_archive_context(self):
-        """Creates a clean build context from git-tracked files only."""
-        self.events.log(STEP_BUILD, "Creating build context from git-tracked files...")
+        """
+        Creates a clean build context from the last commit.
+
+        The archive is taken from HEAD, so it holds neither uncommitted edits nor untracked files;
+        :meth:`uncommitted_changes` lists what that leaves out.
+        """
+        self.events.log(STEP_BUILD, "Creating build context from the last commit (HEAD)...")
         with tempfile.TemporaryDirectory() as temp_dir:
             buf = io.BytesIO()
             with self._reporting_a_missing_git():
